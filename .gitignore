@@ -1,0 +1,10 @@
+node_modules/
+venv/
+__pycache__/
+*.pyc
+downloads/
+server/downloads/
+.env
+*.mp3
+dist/
+*.local

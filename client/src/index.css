@@ -1,0 +1,606 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at top, #1e293b 0, transparent 55%),
+    radial-gradient(circle at bottom, #020617 0, #020617 55%);
+  color: #e5e5e5;
+  min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#root {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 3.5rem;
+}
+
+h1 {
+  font-size: 2rem;
+  font-weight: 650;
+  margin: 0 0 2rem;
+  text-align: center;
+  letter-spacing: 0.02em;
+  background: linear-gradient(135deg, #e5e5e5, #a5b4fc, #38bdf8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+form {
+  background: rgba(15, 23, 42, 0.9);
+  border-radius: 18px;
+  padding: 1.75rem 1.5rem 1.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow:
+    0 18px 45px rgba(15, 23, 42, 0.85),
+    0 0 0 1px rgba(15, 23, 42, 0.6) inset;
+  backdrop-filter: blur(12px);
+}
+
+label {
+  display: block;
+  font-size: 0.875rem;
+  color: #a3a3a3;
+  margin-bottom: 0.25rem;
+}
+
+input[type="text"],
+input[type="number"] {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 16px; /* prevents iOS zoom on focus */
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.9);
+  color: #e5e5e5;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+
+input::placeholder {
+  color: #737373;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35);
+  background: rgba(15, 23, 42, 1);
+}
+
+button {
+  min-height: 44px; /* touch target */
+  padding: 0.75rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 500;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.08s, box-shadow 0.08s;
+}
+
+.btn-primary {
+  background: #3b82f6;
+  color: white;
+  width: 100%;
+  margin-top: 0.5rem;
+  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.35);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 14px 34px rgba(37, 99, 235, 0.45);
+}
+
+.btn-primary:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #404040;
+  color: #e5e5e5;
+  margin-bottom: 1rem;
+  border-radius: 999px;
+}
+
+.btn-secondary:hover {
+  background: #525252;
+}
+
+.btn-play {
+  background: #22c55e;
+  color: white;
+  white-space: nowrap;
+  border-radius: 999px;
+}
+
+.btn-play:hover:not(:disabled) {
+  background: #16a34a;
+}
+
+.btn-play:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-preview {
+  background: #8b5cf6;
+  color: white;
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.btn-preview:hover:not(:disabled) {
+  background: #7c3aed;
+}
+
+.preview-panel {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.preview-panel-inner {
+  background: #1a1a1a;
+  border-radius: 12px;
+  padding: 1.5rem;
+  max-width: 480px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.preview-panel-inner h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.preview-clip-label {
+  color: #a3a3a3;
+  font-size: 0.9rem;
+  margin: 0 0 0.75rem;
+}
+
+.preview-save-label {
+  display: block;
+  margin: 1rem 0 0.25rem;
+  font-size: 0.875rem;
+  color: #a3a3a3;
+}
+
+.preview-name-input {
+  width: 100%;
+  margin-bottom: 0.75rem;
+}
+
+.preview-save-btn {
+  display: inline-block;
+  width: auto;
+  margin-right: 0.75rem;
+  text-decoration: none;
+  text-align: center;
+}
+
+.preview-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.75rem 0 0.5rem;
+  font-size: 0.875rem;
+  color: #a3a3a3;
+}
+
+.preview-loop-toggle input {
+  margin-right: 0.4rem;
+}
+
+.preview-ab-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.preview-ab-toggle span {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+}
+
+.preview-ab-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+#preview-player {
+  margin-bottom: 1rem;
+  min-height: 200px;
+}
+
+.loading {
+  color: #a3a3a3;
+  font-size: 0.9rem;
+  margin-top: 1rem;
+}
+
+.error {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+  padding: 1rem;
+  border-radius: 8px;
+  margin-top: 1rem;
+}
+
+.success {
+  margin-top: 1.5rem;
+}
+
+.success h2 {
+  font-size: 1.25rem;
+  margin: 0 0 0.5rem;
+}
+
+.success-play-label {
+  color: #a3a3a3;
+  font-size: 0.95rem;
+  margin: 0 0 1rem;
+}
+
+.success .audio-wrap {
+  margin: 0 0 1rem;
+}
+
+.audio-wrap {
+  width: 100%;
+  margin: 1rem 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #262626;
+}
+
+.audio-wrap audio {
+  width: 100%;
+  height: 48px;
+}
+
+.download-link {
+  display: inline-block;
+  margin-top: 1rem;
+  padding: 0.75rem 1.5rem;
+  background: #22c55e;
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.download-link:hover {
+  background: #16a34a;
+}
+
+.back-link {
+  display: inline-block;
+  margin-top: 1.5rem;
+  color: #3b82f6;
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.url-list {
+  margin-bottom: 1rem;
+}
+
+.url-row {
+  margin-bottom: 1.25rem;
+  cursor: grab;
+}
+
+.url-input-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.url-input-row input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+
+.song-title {
+  font-size: 0.8rem;
+  color: #9ca3af;
+  margin: 0.15rem 0 0.25rem;
+}
+
+.trim-inline-player {
+  margin-top: 0.5rem;
+  max-width: 360px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.trim-inline-player iframe {
+  width: 100%;
+  height: 200px;
+  border: none;
+}
+
+.url-list input {
+  margin-bottom: 0.5rem;
+}
+
+.trim-wrap {
+  margin-top: 0.5rem;
+}
+
+.trim-label {
+  display: block;
+  font-size: 0.8rem;
+  color: #a3a3a3;
+  margin-bottom: 0.5rem;
+}
+
+.trim-fields {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.trim-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0;
+}
+
+.trim-fields input {
+  width: 6rem;
+  margin-bottom: 0;
+}
+
+.trim-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: #737373;
+  margin-top: 0.5rem;
+}
+
+.trim-warning {
+  color: #f97316;
+}
+
+.trim-loading {
+  font-size: 0.875rem;
+  color: #737373;
+  margin: 0.5rem 0 0;
+}
+
+.trim-range {
+  margin-top: 0.5rem;
+}
+
+.trim-range-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #a3a3a3;
+  margin-bottom: 0.25rem;
+}
+
+.trim-range-segment {
+  color: #e5e5e5;
+}
+
+.trim-track {
+  position: relative;
+  height: 36px;
+  min-height: 36px;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+
+.trim-track-bg {
+  position: absolute;
+  inset: 0;
+  background: #333;
+  border-radius: 6px;
+}
+
+.trim-track-segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #3b82f6;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.trim-handle {
+  position: absolute;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  margin-left: -12px;
+  transform: translateY(-50%);
+  background: #fff;
+  border: 2px solid #3b82f6;
+  border-radius: 50%;
+  cursor: ew-resize;
+  z-index: 1;
+  touch-action: none;
+}
+
+.trim-handle:hover {
+  background: #e5e5e5;
+}
+
+.preview-wrap {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: #1a1a1a;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+.preview-label {
+  display: block;
+  font-size: 0.8rem;
+  color: #737373;
+  margin-bottom: 0.5rem;
+}
+
+.preview-embed {
+  position: relative;
+  width: 100%;
+  max-width: 360px;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.preview-embed iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.field-hint {
+  font-size: 0.8rem;
+  color: #9ca3af;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.share-row {
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.share-link-btn {
+  padding: 0.4rem 0.6rem;
+  border-radius: 999px;
+  width: auto;
+}
+
+.share-icon {
+  display: inline-block;
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.share-icon::before {
+  content: "⛓";
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+@media (max-width: 600px) {
+  #root {
+    padding: 1.5rem 1rem 2rem;
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+    padding-bottom: max(2rem, env(safe-area-inset-bottom));
+  }
+
+  form {
+    padding: 1.25rem 1rem 1.5rem;
+    border-radius: 14px;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    margin-bottom: 1.25rem;
+    line-height: 1.25;
+  }
+
+  .url-input-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .url-input-row .btn-play,
+  .url-input-row .btn-secondary {
+    min-height: 44px;
+  }
+
+  .btn-secondary,
+  .btn-play,
+  .btn-preview,
+  .btn-primary {
+    width: 100%;
+  }
+
+  .preview-panel {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  .preview-panel-inner {
+    padding: 1.25rem 1rem 1.5rem;
+    max-width: 100%;
+    max-height: 85vh;
+  }
+
+  .audio-wrap audio,
+  .preview-panel-inner audio {
+    height: 48px;
+    min-height: 48px;
+  }
+
+  .trim-inline-player,
+  .preview-embed {
+    max-width: 100%;
+  }
+
+  .trim-fields input {
+    min-width: 0;
+    width: 5rem;
+  }
+
+  .download-link,
+  .back-link {
+    display: inline-block;
+    min-height: 44px;
+    line-height: 44px;
+    padding: 0 1rem;
+  }
+}
+
+@media (max-width: 380px) {
+  #root {
+    padding: 1rem 0.75rem 1.5rem;
+  }
+
+  form {
+    padding: 1rem 0.75rem 1.25rem;
+  }
+
+  h1 {
+    font-size: 1.35rem;
+  }
+}
