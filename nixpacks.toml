@@ -1,0 +1,12 @@
+# Railway / Nixpacks: install Node, ffmpeg, and yt-dlp
+[phases.setup]
+nixPkgs = ["nodejs_20", "ffmpeg", "yt-dlp"]
+
+[phases.install]
+cmds = ["cd client && npm ci", "cd server && npm ci"]
+
+[phases.build]
+cmds = ["cd client && npm run build"]
+
+[start]
+cmd = "cd server && node index.js"

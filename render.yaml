@@ -1,0 +1,9 @@
+# Render blueprint: one-click deploy from GitHub
+# https://dashboard.render.com/blueprints
+services:
+  - type: web
+    name: youtube-mashup-app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render sets PORT automatically; server uses process.env.PORT
+    envVars: []
