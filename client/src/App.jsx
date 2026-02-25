@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const API = "/api";
+const MASHUP_TIMEOUT_MS = 180000; // 3 min (cold start + generate)
 
 function formatTime(sec) {
   const m = Math.floor(sec / 60);
@@ -165,6 +166,12 @@ export default function App() {
   const dragIndexRef = useRef(null);
   const [skippedForPreview, setSkippedForPreview] = useState([]);
 
+  useEffect(() => {
+    const ac = new AbortController();
+    fetch(`${API}/health`, { signal: ac.signal }).catch(() => {});
+    return () => ac.abort();
+  }, []);
+
   const addUrl = () => {
     setUrls((prev) => [...prev, ""]);
     setClipStarts((prev) => [...prev, 0]);
@@ -291,6 +298,8 @@ export default function App() {
     setLoading(true);
     setLoadingMode("preview");
     try {
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), MASHUP_TIMEOUT_MS);
       const res = await fetch(`${API}/mashup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -301,7 +310,9 @@ export default function App() {
           crossfade: Number(crossfade) || 2500,
           preview: true,
         }),
+        signal: ac.signal,
       });
+      clearTimeout(to);
       const text = await res.text();
       let data;
       try {
@@ -320,12 +331,13 @@ export default function App() {
       setPreviewABChoice("current");
       setShowPreviewPanel(true);
     } catch (err) {
-      const msg = err.message || "Preview failed.";
-      const isNetwork = msg.includes("fetch") || msg.includes("Network");
+      const isAbort = err.name === "AbortError";
+      const msg = isAbort ? "Request took too long." : (err.message || "Preview failed.");
+      const isNetwork = isAbort || msg.includes("fetch") || msg.includes("Network");
       const hint = typeof window !== "undefined" && window.location.hostname === "localhost"
         ? " Is the server running on port 5175?"
-        : " If the app was idle, the server may be waking up—wait a minute and try again.";
-      setError(isNetwork ? `${msg}${hint}` : msg);
+        : " The server may be waking up—try again in a minute.";
+      setError(isNetwork ? `${msg} ${hint}` : msg);
     } finally {
       setLoading(false);
       setLoadingMode(null);
@@ -411,11 +423,15 @@ export default function App() {
         duration: defaultDur,
         crossfade: Number(crossfade) || 2500,
       };
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), MASHUP_TIMEOUT_MS);
       const res = await fetch(`${API}/mashup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: ac.signal,
       });
+      clearTimeout(to);
       const text = await res.text();
       let data;
       try {
@@ -431,12 +447,13 @@ export default function App() {
       }
       setResult(data);
     } catch (err) {
-      const msg = err.message || "Request failed.";
-      const isNetwork = msg.includes("fetch") || msg.includes("Network");
+      const isAbort = err.name === "AbortError";
+      const msg = isAbort ? "Request took too long." : (err.message || "Request failed.");
+      const isNetwork = isAbort || msg.includes("fetch") || msg.includes("Network");
       const hint = typeof window !== "undefined" && window.location.hostname === "localhost"
         ? " Is the server running on port 5175?"
-        : " If the app was idle, the server may be waking up—wait a minute and try again.";
-      setError(isNetwork ? `${msg}${hint}` : msg);
+        : " The server may be waking up—try again in a minute.";
+      setError(isNetwork ? `${msg} ${hint}` : msg);
     } finally {
       setLoading(false);
       setLoadingMode(null);

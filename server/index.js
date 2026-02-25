@@ -235,6 +235,10 @@ app.get("/api/video-info", (req, res) => {
   }
 });
 
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true });
+});
+
 app.post("/api/mashup", async (req, res) => {
   const { urls = [], clips: clipsBody, duration = 10, crossfade = 1000, preview = false, maxClips = 3 } = req.body;
   const defaultDuration = Math.max(1, Math.min(120, Number(duration) || 10));
