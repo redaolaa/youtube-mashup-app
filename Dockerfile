@@ -4,8 +4,10 @@ FROM node:20-bookworm-slim
 # Install ffmpeg and yt-dlp (required for YouTube download + mix)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    python3-pip \
-    && pip3 install --no-cache-dir yt-dlp \
+    ca-certificates \
+    curl \
+    && curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod +x /usr/local/bin/yt-dlp \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
