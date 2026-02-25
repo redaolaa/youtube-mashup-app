@@ -322,8 +322,15 @@ export default function App() {
         return;
       }
       if (!res.ok) {
-        const msg = data.error || (text && text.slice(0, 200)) || `Preview failed (${res.status}).`;
+        const isTimeout = res.status === 502 || res.status === 504;
+        const msg = isTimeout
+          ? "Preview timed out (server limit). Try 1–2 short clips or use Generate MP3 for the full mix."
+          : (data.error || (text && text.slice(0, 200)) || `Preview failed (${res.status}).`);
         setError(msg);
+        return;
+      }
+      if (!data.streamUrl) {
+        setError("Preview returned no audio URL.");
         return;
       }
       setPrevPreviewStreamUrl((prev) => previewStreamUrl || prev);
@@ -653,7 +660,7 @@ export default function App() {
           <div className="preview-panel-inner">
             <h3>Preview — clips converted to MP3, then mixed with crossfade</h3>
             <p className="preview-clip-label">
-              Same gapless mix as the final file.
+              First 2 clips, up to 12s each (so preview can finish on free hosting). Full mix when you Generate MP3.
               {prevPreviewStreamUrl && " Use A/B compare to hear changes between previews."}
             </p>
             <audio
