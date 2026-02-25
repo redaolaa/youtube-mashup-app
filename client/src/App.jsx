@@ -321,7 +321,11 @@ export default function App() {
       setShowPreviewPanel(true);
     } catch (err) {
       const msg = err.message || "Preview failed.";
-      setError(msg.includes("fetch") || msg.includes("Network") ? `${msg} Is the server running on port 5175?` : msg);
+      const isNetwork = msg.includes("fetch") || msg.includes("Network");
+      const hint = typeof window !== "undefined" && window.location.hostname === "localhost"
+        ? " Is the server running on port 5175?"
+        : " If the app was idle, the server may be waking up—wait a minute and try again.";
+      setError(isNetwork ? `${msg}${hint}` : msg);
     } finally {
       setLoading(false);
       setLoadingMode(null);
@@ -427,7 +431,12 @@ export default function App() {
       }
       setResult(data);
     } catch (err) {
-      setError(err.message || "Request failed.");
+      const msg = err.message || "Request failed.";
+      const isNetwork = msg.includes("fetch") || msg.includes("Network");
+      const hint = typeof window !== "undefined" && window.location.hostname === "localhost"
+        ? " Is the server running on port 5175?"
+        : " If the app was idle, the server may be waking up—wait a minute and try again.";
+      setError(isNetwork ? `${msg}${hint}` : msg);
     } finally {
       setLoading(false);
       setLoadingMode(null);
