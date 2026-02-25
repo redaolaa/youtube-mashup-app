@@ -265,16 +265,6 @@ app.post("/api/mashup", async (req, res) => {
     return res.status(400).json({ error: "Enter at least one YouTube URL." });
   }
 
-  const maxClipsNum = Math.max(1, Math.min(10, Number(maxClips) || 10));
-  if (preview) {
-    list = list.slice(0, maxClipsNum);
-    const previewMaxSec = 15;
-    list = list.map((c) => ({
-      ...c,
-      duration: Math.min(c.duration, previewMaxSec),
-    }));
-  }
-
   const clipPaths = [];
   const clipDurations = [];
   try {
