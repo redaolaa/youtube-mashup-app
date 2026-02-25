@@ -84,7 +84,8 @@ function findYtDlp() {
   return name;
 }
 
-function downloadAudio(url, outPath) {
+function downloadAudio(url, outPath, options = {}) {
+  const { startSec = 0, durationSec } = options;
   const base = path.basename(outPath, ".mp3");
   const outTmpl = path.join(DOWNLOAD_DIR, `${base}.%(ext)s`);
   const ytdlp = findYtDlp();
@@ -95,8 +96,12 @@ function downloadAudio(url, outPath) {
     "-o", outTmpl,
     "--no-warnings",
     "--no-check-certificate",
-    url,
   ];
+  if (durationSec != null && durationSec > 0 && startSec >= 0) {
+    const endSec = startSec + durationSec;
+    args.push("--download-sections", `*${startSec}-${endSec}`, "--force-keyframes-at-cuts");
+  }
+  args.push(url);
   const result = spawnSync(ytdlp, args, {
     encoding: "utf8",
     maxBuffer: 50 * 1024 * 1024,
@@ -265,6 +270,16 @@ app.post("/api/mashup", async (req, res) => {
     return res.status(400).json({ error: "Enter at least one YouTube URL." });
   }
 
+  const maxClipsNum = Math.max(1, Math.min(10, Number(maxClips) || 10));
+  if (preview) {
+    list = list.slice(0, maxClipsNum);
+    const previewMaxSec = 15;
+    list = list.map((c) => ({
+      ...c,
+      duration: Math.min(c.duration, previewMaxSec),
+    }));
+  }
+
   const clipPaths = [];
   const clipDurations = [];
   try {
@@ -272,11 +287,14 @@ app.post("/api/mashup", async (req, res) => {
       const { url, start: startSec, duration: durationSec } = list[i];
       const clipId = uuidv4().replace(/-/g, "");
       const rawPath = path.join(DOWNLOAD_DIR, `clip_${clipId}.mp3`);
+      const downloadOpts = preview ? { startSec, durationSec } : {};
       console.log(`[Mashup] Downloading clip ${i + 1}/${list.length} …`);
-      downloadAudio(url, rawPath);
-      console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${startSec}s–${startSec + durationSec}s …`);
+      downloadAudio(url, rawPath, downloadOpts);
+      const trimStart = preview ? 0 : startSec;
+      const trimDur = durationSec;
+      console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${trimStart}s–${trimStart + trimDur}s …`);
       const trimPath = path.join(DOWNLOAD_DIR, `trim_${clipId}.wav`);
-      await trimToSegment(rawPath, trimPath, startSec, durationSec);
+      await trimToSegment(rawPath, trimPath, trimStart, trimDur);
       fs.unlinkSync(rawPath);
       clipPaths.push(trimPath);
       clipDurations.push(durationSec);

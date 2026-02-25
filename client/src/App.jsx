@@ -300,7 +300,7 @@ export default function App() {
           duration: DEFAULT_CLIP_DURATION,
           crossfade: Number(crossfade) || 2500,
           preview: true,
-          maxClips: Math.min(5, list.length),
+          maxClips: Math.min(3, list.length),
         }),
       });
       const text = await res.text();
@@ -628,7 +628,7 @@ export default function App() {
           <div className="preview-panel-inner">
             <h3>Preview — clips converted to MP3, then mixed with crossfade</h3>
             <p className="preview-clip-label">
-              First 5 clips. Same gapless mix as the final file.
+              First 3 clips (up to 15s each). Same gapless mix as the final file.
               {prevPreviewStreamUrl && " Use A/B compare to hear changes between previews."}
             </p>
             <audio
