@@ -1,11 +1,13 @@
 # Render (and others): Node + ffmpeg + yt-dlp so the app can run for others
 FROM node:20-bookworm-slim
 
-# Install ffmpeg and yt-dlp (required for YouTube download + mix)
+# Install ffmpeg, python3 (needed by yt-dlp script), and yt-dlp
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ca-certificates \
     curl \
+    python3 \
+    python3-minimal \
     && curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod +x /usr/local/bin/yt-dlp \
     && rm -rf /var/lib/apt/lists/*
