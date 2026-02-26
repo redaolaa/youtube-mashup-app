@@ -128,8 +128,10 @@ function getYtDlpBaseArgs() {
     args.push("--cookies", cookiesPath);
   } else if (cookiesB64) {
     try {
+      const decoded = Buffer.from(cookiesB64.trim(), "base64").toString("utf8");
       const cookiePath = path.join(DOWNLOAD_DIR, ".cookies.txt");
-      fs.writeFileSync(cookiePath, Buffer.from(cookiesB64, "base64").toString("utf8"), { mode: 0o600 });
+      const withHeader = decoded.startsWith("#") ? decoded : "# Netscape HTTP Cookie File\n" + decoded;
+      fs.writeFileSync(cookiePath, withHeader, { mode: 0o600 });
       args.push("--cookies", cookiePath);
     } catch (_) {}
   }
