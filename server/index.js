@@ -181,7 +181,7 @@ function downloadAudio(url, outPath, opts = {}) {
     }
     const args = [
       "--extract-audio",
-      "--audio-format", "best",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
       "-o", outTmpl,
       ...getYtDlpBaseArgs(client),
       url,
