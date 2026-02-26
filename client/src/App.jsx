@@ -3,6 +3,25 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // Use relative /api so Vite proxies to 5175 when on 5173 (avoids cross-origin "Failed to fetch")
 const API = "/api";
 
+const SAVED_MASHUPS_KEY = "mashup_saved";
+
+function getSavedMashups() {
+  try {
+    const raw = localStorage.getItem(SAVED_MASHUPS_KEY);
+    if (!raw) return [];
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedMashups(list) {
+  try {
+    localStorage.setItem(SAVED_MASHUPS_KEY, JSON.stringify(list));
+  } catch (_) {}
+}
+
 function formatTime(sec) {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
@@ -143,7 +162,7 @@ function useElapsed(loading) {
 
 export default function App() {
   const DEFAULT_CLIP_DURATION = 10;
-  const [urls, setUrls] = useState([""]);
+  const [urls, setUrls] = useState([]);
   const [crossfade, setCrossfade] = useState(2500);
   const [loading, setLoading] = useState(false);
   const [loadingMode, setLoadingMode] = useState(null);
@@ -166,8 +185,19 @@ export default function App() {
   const previewPanelRef = useRef(null);
   const errorRef = useRef(null);
   const dragIndexRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const uploadRowRef = useRef(null);
+  const mashupListRef = useRef(null);
+  const lastTrackRowRef = useRef(null);
+  const trimAudioRefs = useRef([]);
   const [skippedForPreview, setSkippedForPreview] = useState([]);
   const [serverOk, setServerOk] = useState(null);
+  const [convertUrl, setConvertUrl] = useState("");
+  const [convertLoading, setConvertLoading] = useState(false);
+  const [convertResult, setConvertResult] = useState(null);
+  const [convertError, setConvertError] = useState("");
+  const [savedMashups, setSavedMashups] = useState(() => getSavedMashups());
+  const [mashupNameForSave, setMashupNameForSave] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -184,6 +214,14 @@ export default function App() {
     setClipDurations((prev) => [...prev, null]);
     setVideoDurations((prev) => [...prev, null]);
     setSongTitles((prev) => [...prev, null]);
+  };
+
+  const addConvertedToMashup = (uploadId, duration, title = "YouTube → MP3") => {
+    setUrls((prev) => [...prev, `upload:${uploadId}`]);
+    setClipStarts((prev) => [...prev, 0]);
+    setClipDurations((prev) => [...prev, Math.min(30, duration)]);
+    setVideoDurations((prev) => [...prev, duration]);
+    setSongTitles((prev) => [...prev, title]);
   };
   const setUrl = (i, v) => {
     const prevUrl = urls[i];
@@ -208,6 +246,75 @@ export default function App() {
     if (e.key === "Enter" && e.shiftKey) {
       e.preventDefault();
       if (!loading) startPreview();
+    }
+  };
+
+  const triggerUpload = (rowIndex) => () => {
+    uploadRowRef.current = rowIndex;
+    fileInputRef.current?.click();
+  };
+  const handleUploadChange = async (e) => {
+    const file = e.target?.files?.[0];
+    const rowIndex = uploadRowRef.current;
+    e.target.value = "";
+    uploadRowRef.current = null;
+    if (file == null || rowIndex == null) return;
+    setDurationLoading((prev) => ({ ...prev, [rowIndex]: true }));
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API}/upload`, { method: "POST", body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || "Upload failed.");
+        return;
+      }
+      const { uploadId, duration } = data;
+      setUrl(rowIndex, `upload:${uploadId}`);
+      setVideoDuration(rowIndex, duration ?? null);
+      setSongTitles((prev) => prev.map((t, j) => (j === rowIndex ? file.name : t)));
+    } catch (err) {
+      setError(err.message || "Upload failed.");
+    } finally {
+      setDurationLoading((prev) => ({ ...prev, [rowIndex]: false }));
+    }
+  };
+
+  const handleConvert = async (e) => {
+    e?.preventDefault();
+    const url = (convertUrl || "").trim();
+    if (!url || !getYouTubeVideoId(url)) {
+      setConvertError("Enter a valid YouTube link.");
+      return;
+    }
+    setConvertError("");
+    setConvertResult(null);
+    setConvertLoading(true);
+    try {
+      const res = await fetch(`${API}/convert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url.startsWith("http") ? url : "https://" + url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setConvertError(data.error || "Convert failed.");
+        return;
+      }
+      setConvertResult(data);
+      if (data.uploadId != null) {
+        const label = data.title || url || "YouTube → MP3";
+        const duration = data.duration ?? 0;
+        const uploadId = data.uploadId;
+        requestAnimationFrame(() => {
+          addConvertedToMashup(uploadId, duration, label);
+          setTimeout(() => lastTrackRowRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 200);
+        });
+      }
+    } catch (err) {
+      setConvertError(err.message || "Convert failed.");
+    } finally {
+      setConvertLoading(false);
     }
   };
 
@@ -258,7 +365,9 @@ export default function App() {
       const dur = Math.max(1, Math.min((clipDurations[i] ?? defaultDur), maxLen - start));
       s.split(/[\n,\s]+/).forEach((part) => {
         const u = part.trim();
-        if (u) list.push({ url: u.startsWith("http") ? u : "https://" + u, start, duration: dur, index: i });
+        if (!u) return;
+        const url = u.startsWith("http") ? u : u.startsWith("upload:") ? u : "https://" + u;
+        list.push({ url, start, duration: dur, index: i });
       });
     });
     return list;
@@ -277,6 +386,62 @@ export default function App() {
     }
   }, []);
 
+  const buildCurrentRecipe = useCallback(() => {
+    const clips = [];
+    urls.forEach((raw, i) => {
+      const s = (raw || "").trim();
+      if (!s) return;
+      clips.push({
+        url: s.startsWith("http") ? s : s.startsWith("upload:") ? s : "https://" + s,
+        start: Math.max(0, clipStarts[i] ?? 0),
+        duration: Math.max(1, clipDurations[i] ?? DEFAULT_CLIP_DURATION),
+        trackDuration: videoDurations[i] ?? null,
+        title: songTitles[i] ?? null,
+      });
+    });
+    return { crossfade: Number(crossfade) || 2500, clips };
+  }, [urls, clipStarts, clipDurations, videoDurations, songTitles, crossfade]);
+
+  const handleSaveMashup = useCallback(() => {
+    const { clips, crossfade: cf } = buildCurrentRecipe();
+    if (clips.length === 0) return;
+    const name = (mashupNameForSave || "").trim() || `Mashup ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    const saved = {
+      id: crypto.randomUUID?.() ?? `m-${Date.now()}`,
+      name,
+      createdAt: Date.now(),
+      crossfade: cf,
+      clips,
+    };
+    setSavedMashups((prev) => {
+      const next = [saved, ...prev];
+      saveSavedMashups(next);
+      return next;
+    });
+    setMashupNameForSave("");
+  }, [buildCurrentRecipe, mashupNameForSave]);
+
+  const handleLoadMashup = useCallback((m) => {
+    if (!m?.clips?.length) return;
+    setUrls(m.clips.map((c) => c.url));
+    setClipStarts(m.clips.map((c) => c.start));
+    setClipDurations(m.clips.map((c) => c.duration));
+    setVideoDurations(m.clips.map((c) => c.trackDuration ?? null));
+    setSongTitles(m.clips.map((c) => c.title ?? null));
+    setCrossfade(Math.max(2500, Math.min(6000, m.crossfade ?? 2500)));
+    setError("");
+    setResult(null);
+  }, []);
+
+  const handleDeleteMashup = useCallback((id) => {
+    if (!id) return;
+    setSavedMashups((prev) => {
+      const next = prev.filter((m) => m.id !== id);
+      saveSavedMashups(next);
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -291,10 +456,20 @@ export default function App() {
     }
   }, [applyRecipe]);
 
+  const stopAllOtherAudio = useCallback(() => {
+    if (previewAudioRef.current) previewAudioRef.current.pause();
+    (trimAudioRefs.current || []).forEach((el) => { if (el && el.pause) el.pause(); });
+  }, []);
+
+  const stopTrimAudiosOnly = useCallback(() => {
+    (trimAudioRefs.current || []).forEach((el) => { if (el && el.pause) el.pause(); });
+  }, []);
+
   const startPreview = useCallback(async () => {
+    stopAllOtherAudio();
     const list = buildClipsList();
     if (list.length === 0) {
-      setError("Add at least one YouTube link to preview.");
+      setError("Add at least one track: convert a YouTube link above and click ‘Add to mashup’, or upload a file.");
       return;
     }
     const included = new Set(list.map((c) => c.index));
@@ -314,6 +489,8 @@ export default function App() {
         body: JSON.stringify({
           clips: list.map(({ url, start, duration }) => ({ url, start, duration })),
           urls: list.map((c) => c.url),
+          titles: list.map((c) => songTitles[c.index] ?? ""),
+          name: (mashupNameForSave || "").trim() || undefined,
           duration: DEFAULT_CLIP_DURATION,
           crossfade: Number(crossfade) || 2500,
           preview: true,
@@ -366,7 +543,7 @@ export default function App() {
       setLoading(false);
       setLoadingMode(null);
     }
-  }, [buildClipsList, crossfade, previewStreamUrl]);
+  }, [buildClipsList, crossfade, previewStreamUrl, stopAllOtherAudio]);
 
   useEffect(() => {
     if (!previewAudioRef.current) return;
@@ -425,7 +602,7 @@ export default function App() {
       let dur = Math.max(1, Math.min((clipDurations[i] ?? defaultDur), maxLen - start));
       raw.split(/[\n,\s]+/).forEach((s) => {
         const url = s.trim();
-        if (url) list.push({ url, start, duration: dur });
+        if (url) list.push({ url, start, duration: dur, index: i });
       });
     });
     if (list.length === 0) {
@@ -437,12 +614,12 @@ export default function App() {
         let dur = Math.max(1, Math.min((clipDurations[i] ?? defaultDur), maxLen - start));
         s.split(/[\n,\s]+/).forEach((part) => {
           const url = part.trim();
-          if (url) list.push({ url, start, duration: dur });
+          if (url) list.push({ url, start, duration: dur, index: i });
         });
       });
     }
     if (list.length === 0) {
-      setError("Enter at least one YouTube URL in the link fields above.");
+      setError("Add at least one track: convert a YouTube link above and click ‘Add to mashup’, or upload a file.");
       return;
     }
     setError("");
@@ -453,6 +630,8 @@ export default function App() {
       const payload = {
         clips: list.map(({ url, start, duration }) => ({ url, start, duration })),
         urls: list.map((c) => c.url),
+        titles: list.map((c) => songTitles[c.index] ?? ""),
+        name: (mashupNameForSave || "").trim() || undefined,
         duration: defaultDur,
         crossfade: Number(crossfade) || 2500,
       };
@@ -498,7 +677,7 @@ export default function App() {
             Your browser does not support the audio player.
           </audio>
         </div>
-        <a className="download-link" href={result.downloadUrl} download>
+        <a className="download-link" href={result.downloadUrl} download={result.suggestedFilename || "mashup.mp3"}>
           Download MP3
         </a>
         <br />
@@ -512,29 +691,73 @@ export default function App() {
   return (
     <>
       <h1>YouTube Mashup Generator</h1>
+
+      <section className="convert-section" aria-label="Convert YouTube to MP3">
+        <h2>Convert YouTube to MP3</h2>
+        <p className="convert-desc">Paste a link — the track appears right below and you trim it immediately.</p>
+        <div className="convert-row">
+          <input
+            type="text"
+            className="convert-input"
+            placeholder="https://youtube.com/watch?v=..."
+            value={convertUrl}
+            onChange={(e) => { setConvertUrl(e.target.value); setConvertError(""); setConvertResult(null); }}
+            onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleConvert(e))}
+            disabled={convertLoading}
+          />
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={convertLoading || !convertUrl.trim()}
+            onClick={handleConvert}
+          >
+            {convertLoading ? "Converting…" : "Convert to MP3"}
+          </button>
+        </div>
+        {convertError && <p className="convert-error">{convertError}</p>}
+        {convertResult && (
+          <div className="convert-result">
+            <audio controls src={convertResult.streamUrl} style={{ display: "block", marginBottom: "0.5rem" }} />
+            <a href={convertResult.downloadUrl} download className="btn-secondary">
+              Download MP3
+            </a>
+          </div>
+        )}
+      </section>
+
       <form onSubmit={handleSubmit} onKeyDown={handleFormKeyDown}>
-        <label>YouTube links</label>
-        <div className="url-list">
+        <div className="url-list" ref={mashupListRef}>
+          {urls.length === 0 && (
+            <p className="trim-placeholder">Convert a link above — your track will appear here for trimming.</p>
+          )}
+          {urls.length >= 1 && (
+            <p className="tracks-hint">Trim each track below. Convert another link above or add a track below to build your mashup.</p>
+          )}
+          <input
+            type="file"
+            ref={fileInputRef}
+            accept="audio/*,.mp3,.m4a,.wav,.webm,.ogg"
+            style={{ display: "none" }}
+            onChange={handleUploadChange}
+          />
           {urls.map((u, i) => {
             const videoId = getYouTubeVideoId(u);
+            const isUpload = typeof u === "string" && u.startsWith("upload:");
+            const isLastRow = i === urls.length - 1;
             return (
               <div
-                key={i}
-                className="url-row"
-                draggable
-                onDragStart={() => { dragIndexRef.current = i; }}
-                onDragOver={(e) => e.preventDefault()}
+                key={`${i}-${u}`}
+                className="url-row track-card"
+                ref={isLastRow ? lastTrackRowRef : null}
+                onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("track-card--drag-over"); }}
+                onDragLeave={(e) => { e.currentTarget.classList.remove("track-card--drag-over"); }}
                 onDrop={(e) => {
                   e.preventDefault();
+                  e.currentTarget.classList.remove("track-card--drag-over");
                   const from = dragIndexRef.current;
                   const to = i;
                   if (from == null || from === to) return;
-                  const reorder = (arr) => {
-                    const next = [...arr];
-                    const [moved] = next.splice(from, 1);
-                    next.splice(to, 0, moved);
-                    return next;
-                  };
+                  const reorder = (arr) => { const next = [...arr]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); return next; };
                   setUrls((prev) => reorder(prev));
                   setClipStarts((prev) => reorder(prev));
                   setClipDurations((prev) => reorder(prev));
@@ -542,40 +765,74 @@ export default function App() {
                   setSongTitles((prev) => reorder(prev));
                   dragIndexRef.current = null;
                 }}
-                onDragEnd={() => { dragIndexRef.current = null; }}
               >
-                <div className="url-input-row">
-                  <input
-                    type="text"
-                    data-url-input
-                    placeholder="https://youtube.com/watch?v=..."
-                    value={u}
-                    onChange={(e) => setUrl(i, e.target.value)}
-                    onKeyDown={handleUrlKeyDown(i)}
-                  />
-                  <button
-                    type="button"
-                    className="btn-play"
-                    title="Play this song in a new tab"
-                    disabled={!videoId}
-                    onClick={() => videoId && window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank")}
+                <div className="track-card-header">
+                  <span className="track-number">{i + 1}</span>
+                  <div
+                    className="track-drag-handle"
+                    draggable
+                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); dragIndexRef.current = i; e.currentTarget.closest(".track-card")?.classList.add("track-card--dragging"); }}
+                    onDragEnd={() => { document.querySelectorAll(".track-card").forEach((el) => el.classList.remove("track-card--dragging", "track-card--drag-over")); dragIndexRef.current = null; }}
+                    title="Drag to reorder"
                   >
-                    ▶ Play
-                  </button>
-                  {urls.length > 1 && (
-                    <button type="button" className="btn-secondary" onClick={() => removeUrl(i)}>
-                      Remove
-                    </button>
-                  )}
-                </div>
-                {songTitles[i] && (
-                  <div className="song-title">
-                    {songTitles[i]}
+                    ⋮⋮
                   </div>
-                )}
+                  <div className="track-card-title">
+                    {isUpload ? (
+                      <span className="track-title-text">{songTitles[i] || "Audio file"}</span>
+                    ) : songTitles[i] ? (
+                      <span className="track-title-text" title={u}>{songTitles[i]}</span>
+                    ) : (
+                      <input
+                        type="text"
+                        data-url-input
+                        placeholder="Paste YouTube link or upload file"
+                        value={u}
+                        onChange={(e) => setUrl(i, e.target.value)}
+                        onKeyDown={handleUrlKeyDown(i)}
+                        className="track-url-input"
+                      />
+                    )}
+                  </div>
+                  <div className="track-card-actions">
+                    {isUpload && <button type="button" className="btn-secondary btn-sm" onClick={() => { setUrl(i, ""); setSongTitles((p) => p.map((t, j) => (j === i ? null : t))); setVideoDurations((p) => p.map((d, j) => (j === i ? null : d))); }}>Replace</button>}
+                    {!isUpload && videoId && <button type="button" className="btn-secondary btn-sm" onClick={() => window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank")} title="Open in YouTube">▶</button>}
+                    {!isUpload && <button type="button" className="btn-secondary btn-sm" onClick={triggerUpload(i)}>Upload</button>}
+                    {urls.length > 1 && <button type="button" className="btn-secondary btn-sm btn-remove" onClick={() => removeUrl(i)} title="Remove">✕</button>}
+                  </div>
+                </div>
+                <div className="track-card-body">
+                  {!isUpload && songTitles[i] && (
+                    <div className="track-url-row">
+                      <label className="track-url-label">Link</label>
+                      <input
+                        type="text"
+                        data-url-input
+                        value={u}
+                        onChange={(e) => setUrl(i, e.target.value)}
+                        onKeyDown={handleUrlKeyDown(i)}
+                        className="track-url-input track-url-input--small"
+                        placeholder="YouTube URL"
+                      />
+                    </div>
+                  )}
                 <div className="trim-wrap">
+                  {(videoDurations[i] != null || videoId || isUpload) && (
+                    <p className="trim-label">Trim this clip</p>
+                  )}
+                  {isUpload && typeof u === "string" && u.startsWith("upload:") && (
+                    <div className="trim-audio-player">
+                      <audio
+                        ref={(el) => { trimAudioRefs.current[i] = el; }}
+                        controls
+                        src={`${API}/stream/upload_${u.slice(7)}.mp3`}
+                        style={{ width: "100%", maxWidth: "400px" }}
+                        title="Audio track"
+                      />
+                    </div>
+                  )}
                   {durationLoading[i] && <p className="trim-loading">Loading song length…</p>}
-                  {(videoDurations[i] != null || videoId) && (
+                  {(videoDurations[i] != null || videoId || isUpload) && (
                     <TrimRange
                       videoDuration={videoDurations[i] ?? 300}
                       start={clipStarts[i] ?? 0}
@@ -603,13 +860,19 @@ export default function App() {
                     </div>
                   )}
                 </div>
+                </div>
               </div>
             );
           })}
         </div>
-        <button type="button" className="btn-secondary" onClick={addUrl}>
-          Add another link
-        </button>
+        {urls.length >= 1 && (
+          <div className="add-another-wrap">
+            <button type="button" className="btn-add-another" onClick={addUrl}>
+              + Add another track
+            </button>
+            <span className="add-another-hint">Paste a YouTube link here or upload a file, or convert another link above.</span>
+          </div>
+        )}
         {urls.length >= 2 && (
           <button
             type="button"
@@ -663,6 +926,22 @@ export default function App() {
           </button>
         </div>
 
+        {urls.length >= 1 && (
+          <div className="save-mashup-row">
+            <input
+              type="text"
+              className="save-mashup-name"
+              placeholder="Name this mashup"
+              value={mashupNameForSave}
+              onChange={(e) => setMashupNameForSave(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleSaveMashup())}
+            />
+            <button type="button" className="btn-secondary" onClick={handleSaveMashup}>
+              Save mashup
+            </button>
+          </div>
+        )}
+
         {serverOk === false && (
           <p className="error" style={{ marginBottom: "0.5rem" }}>
             Server not connected. Start it: <code>cd youtube-mashup-app && npm start</code> then run the client on port 5173.
@@ -678,6 +957,31 @@ export default function App() {
           {loading ? "Generating…" : "Generate MP3"}
         </button>
       </form>
+
+      {savedMashups.length > 0 && (
+        <section className="saved-mashups" aria-label="Saved mashups">
+          <h2>Saved mashups</h2>
+          <p className="saved-mashups-desc">Open one to edit the songs and trim, then generate again.</p>
+          <ul className="saved-mashups-list">
+            {savedMashups.map((m) => (
+              <li key={m.id} className="saved-mashups-item">
+                <span className="saved-mashups-name">{m.name}</span>
+                <span className="saved-mashups-meta">
+                  {m.clips?.length ?? 0} track{m.clips?.length === 1 ? "" : "s"} · {new Date(m.createdAt).toLocaleDateString()}
+                </span>
+                <div className="saved-mashups-actions">
+                  <button type="button" className="btn-secondary" onClick={() => handleLoadMashup(m)}>
+                    Open to edit
+                  </button>
+                  <button type="button" className="btn-secondary btn-danger" onClick={() => handleDeleteMashup(m.id)}>
+                    Delete
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {showPreviewPanel && (
         <div className="preview-panel" ref={previewPanelRef}>
@@ -698,6 +1002,7 @@ export default function App() {
               controls
               autoPlay
               playsInline
+              onPlay={stopTrimAudiosOnly}
             />
             <div className="preview-controls-row">
               <label className="preview-loop-toggle">

@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import { spawnSync, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -27,6 +28,12 @@ function cleanupOldFiles() {
         else if (name.startsWith("final_mix_") && name.endsWith(".mp3")) {
           const stat = fs.statSync(full);
           if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(full);
+        } else if (name.startsWith("upload_") && (name.endsWith(".mp3") || name.endsWith(".m4a") || name.endsWith(".webm") || name.endsWith(".wav"))) {
+          const stat = fs.statSync(full);
+          if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(full);
+        } else if (name.startsWith("convert_") && name.endsWith(".mp3")) {
+          const stat = fs.statSync(full);
+          if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(full);
         }
       } catch (_) {}
     }
@@ -38,10 +45,11 @@ app.use(cors());
 app.use(express.json());
 
 // Light rate limit so we don't hammer YouTube (helps cookies last longer)
-const rateLimit = { videoInfo: new Map(), mashup: new Map() };
+const rateLimit = { videoInfo: new Map(), mashup: new Map(), convert: new Map() };
 const RATE_WINDOW_MS = 60 * 1000;
 const MAX_VIDEO_INFO_PER_MIN = 20;
 const MAX_MASHUP_PER_MIN = 5;
+const MAX_CONVERT_PER_MIN = 3;
 function checkRateLimit(key, map, max) {
   const now = Date.now();
   let list = map.get(key) || [];
@@ -51,6 +59,50 @@ function checkRateLimit(key, map, max) {
   map.set(key, list);
   return true;
 }
+
+const uploadStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, DOWNLOAD_DIR),
+  filename: (req, file, cb) => cb(null, `upload_${uuidv4().replace(/-/g, "")}${path.extname(file.originalname) || ".mp3"}`),
+});
+const uploadMulter = multer({ storage: uploadStorage, limits: { fileSize: 150 * 1024 * 1024 } });
+
+function getAudioDurationSeconds(filePath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err) return reject(err);
+      const d = data?.format?.duration;
+      if (typeof d === "number" && d > 0) return resolve(d);
+      reject(new Error("Could not get duration"));
+    });
+  });
+}
+
+app.post("/api/upload", uploadMulter.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+  const rawPath = req.file.path;
+  const ext = path.extname(rawPath).toLowerCase();
+  const base = path.basename(rawPath, ext);
+  const uploadId = base.replace(/^upload_/, "");
+  const outPath = path.join(DOWNLOAD_DIR, `upload_${uploadId}.mp3`);
+  try {
+    if (ext !== ".mp3") {
+      const result = spawnSync("ffmpeg", ["-y", "-i", rawPath, "-acodec", "libmp3lame", "-q:a", "2", outPath], {
+        encoding: "utf8",
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      fs.unlinkSync(rawPath);
+      if (result.status !== 0) throw new Error(result.stderr || "Conversion failed");
+    } else {
+      fs.renameSync(rawPath, outPath);
+    }
+    const duration = await getAudioDurationSeconds(outPath);
+    return res.json({ uploadId, duration: Math.floor(duration) });
+  } catch (e) {
+    try { fs.unlinkSync(rawPath); } catch (_) {}
+    try { fs.unlinkSync(outPath); } catch (_) {}
+    return res.status(400).json({ error: e.message || "Invalid or unsupported audio file." });
+  }
+});
 
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "Server running" });
@@ -330,6 +382,32 @@ function concatWithCrossfade(inputPaths, durationsSec, outputPath, crossfadeMs) 
   }
 }
 
+function getVideoMetadata(cleanUrl) {
+  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
+  const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
+  const ytdlp = findYtDlp();
+  for (const client of clientsToTry) {
+    const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client), cleanUrl], {
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+      env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
+    });
+    if (result.error && result.error.code === "ENOENT") return null;
+    if (result.status === 0) {
+      try {
+        const data = JSON.parse(result.stdout || "{}");
+        const duration = data.duration;
+        const title = data.title;
+        return {
+          duration: duration != null && typeof duration === "number" && duration > 0 ? Math.floor(duration) : null,
+          title: typeof title === "string" && title.trim() ? title.trim() : null,
+        };
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
 app.get("/api/video-info", (req, res) => {
   const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
   if (!checkRateLimit(ip, rateLimit.videoInfo, MAX_VIDEO_INFO_PER_MIN)) {
@@ -378,7 +456,7 @@ app.post("/api/mashup", async (req, res) => {
   if (!checkRateLimit(ip, rateLimit.mashup, MAX_MASHUP_PER_MIN)) {
     return res.status(429).json({ error: "Too many mashups. Wait a minute and try again." });
   }
-  const { urls = [], clips: clipsBody, duration = 10, crossfade = 1000, preview = false, maxClips = 3 } = req.body;
+  const { urls = [], clips: clipsBody, duration = 10, crossfade = 1000, preview = false, maxClips = 3, name: mashupName, titles: clipTitles } = req.body;
   const defaultDuration = Math.max(1, Math.min(120, Number(duration) || 10));
   const crossfadeMs = Math.max(2500, Math.min(6000, Number(crossfade) || 2500));
 
@@ -395,16 +473,18 @@ app.post("/api/mashup", async (req, res) => {
   if (!list || list.length === 0) {
     list = urlList.map((url) => ({ url, start: 0, duration: defaultDuration }));
   }
+  const titles = Array.isArray(clipTitles) ? clipTitles.slice(0, list.length) : [];
+  const nameStr = typeof mashupName === "string" ? mashupName.trim() : "";
 
-  const invalid = list.filter((c) => !isYouTubeUrl(c.url));
+  const invalid = list.filter((c) => !isYouTubeUrl(c.url) && !String(c.url).startsWith("upload:"));
   if (invalid.length) {
     return res.status(400).json({
-      error: "These links don’t look like YouTube URLs: " + invalid.slice(0, 3).map((c) => `"${c.url.slice(0, 50)}${c.url.length > 50 ? "…" : ""}"`).join(", "),
+      error: "Each clip must be a YouTube URL or an uploaded file: " + invalid.slice(0, 3).map((c) => `"${String(c.url).slice(0, 50)}…"`).join(", "),
       invalid: invalid.slice(0, 5).map((c) => c.url),
     });
   }
   if (list.length === 0) {
-    return res.status(400).json({ error: "Enter at least one YouTube URL." });
+    return res.status(400).json({ error: "Enter at least one YouTube URL or upload a file." });
   }
 
   const clipPaths = [];
@@ -412,15 +492,25 @@ app.post("/api/mashup", async (req, res) => {
   try {
     for (let i = 0; i < list.length; i++) {
       const { url, start: startSec, duration: durationSec } = list[i];
-      const clipUrl = normalizeYouTubeUrl(url);
       const clipId = uuidv4().replace(/-/g, "");
-      const rawPath = path.join(DOWNLOAD_DIR, `clip_${clipId}.mp3`);
-      console.log(`[Mashup] Downloading clip ${i + 1}/${list.length} …`);
-      downloadAudio(clipUrl, rawPath);
-      console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${startSec}s–${startSec + durationSec}s …`);
       const trimPath = path.join(DOWNLOAD_DIR, `trim_${clipId}.wav`);
+      let rawPath;
+      if (String(url).startsWith("upload:")) {
+        const uploadId = String(url).slice(7).trim();
+        rawPath = path.join(DOWNLOAD_DIR, `upload_${uploadId}.mp3`);
+        if (!fs.existsSync(rawPath)) {
+          throw new Error(`Uploaded file not found. Re-upload the file for clip ${i + 1}.`);
+        }
+        console.log(`[Mashup] Using uploaded file for clip ${i + 1}/${list.length}, trimming ${startSec}s–${startSec + durationSec}s …`);
+      } else {
+        const clipUrl = normalizeYouTubeUrl(url);
+        rawPath = path.join(DOWNLOAD_DIR, `clip_${clipId}.mp3`);
+        console.log(`[Mashup] Downloading clip ${i + 1}/${list.length} …`);
+        downloadAudio(clipUrl, rawPath);
+        console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${startSec}s–${startSec + durationSec}s …`);
+      }
       await trimToSegment(rawPath, trimPath, startSec, durationSec);
-      fs.unlinkSync(rawPath);
+      if (!String(url).startsWith("upload:")) fs.unlinkSync(rawPath);
       clipPaths.push(trimPath);
       clipDurations.push(durationSec);
     }
@@ -432,13 +522,73 @@ app.post("/api/mashup", async (req, res) => {
     concatWithCrossfade(clipPaths, clipDurations, finalPath, crossfadeMs);
     clipPaths.forEach((p) => { try { fs.unlinkSync(p); } catch (_) {} });
 
+    const metaTitle = nameStr || "Mashup";
+    const metaComment = titles.filter(Boolean).length > 0 ? titles.map((t, i) => `Track ${i + 1}: ${String(t).slice(0, 100)}`).join(" | ") : "";
+    if (metaComment || metaTitle !== "Mashup") {
+      try {
+        const tempMeta = path.join(DOWNLOAD_DIR, `meta_${finalId}.mp3`);
+        const metaArgs = ["-y", "-i", finalPath, "-metadata", `title=${metaTitle}`, "-c", "copy"];
+        if (metaComment) metaArgs.push("-metadata", `comment=${metaComment.slice(0, 250)}`);
+        metaArgs.push(tempMeta);
+        const metaResult = spawnSync("ffmpeg", metaArgs, { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+        if (metaResult.status === 0 && fs.existsSync(tempMeta)) {
+          fs.renameSync(tempMeta, finalPath);
+        }
+      } catch (_) {}
+    }
+
+    const safeName = (nameStr || "mashup").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 200) || "mashup";
+    const suggestedFilename = `${safeName}.mp3`;
+
     const filename = `${filePrefix}${finalId}.mp3`;
-    return res.json({ filename, streamUrl: `/api/stream/${filename}`, downloadUrl: `/api/download/${filename}`, preview: !!preview });
+    return res.json({
+      filename,
+      suggestedFilename,
+      streamUrl: `/api/stream/${filename}`,
+      downloadUrl: `/api/download/${filename}${suggestedFilename ? `?name=${encodeURIComponent(suggestedFilename)}` : ""}`,
+      preview: !!preview,
+    });
   } catch (err) {
     console.error("[Mashup]", err);
     clipPaths.forEach((p) => { try { fs.unlinkSync(p); } catch (_) {} });
     const msg = friendlyYouTubeError(err.message) || err.message || "Failed to generate mashup.";
     return res.status(500).json({ error: msg });
+  }
+});
+
+app.post("/api/convert", async (req, res) => {
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+  if (!checkRateLimit(ip, rateLimit.convert, MAX_CONVERT_PER_MIN)) {
+    return res.status(429).json({ error: "Too many conversions. Wait a minute and try again." });
+  }
+  const url = req.body?.url;
+  if (!url || !isYouTubeUrl(url)) {
+    return res.status(400).json({ error: "Valid YouTube URL required." });
+  }
+  const cleanUrl = normalizeYouTubeUrl(url);
+  const id = uuidv4().replace(/-/g, "");
+  const outPath = path.join(DOWNLOAD_DIR, `upload_${id}.mp3`);
+  let title = null;
+  try {
+    const meta = getVideoMetadata(cleanUrl);
+    if (meta?.title) title = meta.title;
+    console.log("[Convert] Downloading full audio …");
+    downloadAudio(cleanUrl, outPath);
+    const duration = await getAudioDurationSeconds(outPath);
+    const filename = `upload_${id}.mp3`;
+    return res.json({
+      uploadId: id,
+      duration: Math.floor(duration),
+      title: title || null,
+      filename,
+      streamUrl: `/api/stream/${filename}`,
+      downloadUrl: `/api/download/${filename}`,
+    });
+  } catch (err) {
+    console.error("[Convert]", err);
+    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch (_) {}
+    const msg = friendlyYouTubeError(err.message) || err.message || "Failed to convert.";
+    return res.status(502).json({ error: msg });
   }
 });
 
@@ -453,7 +603,14 @@ app.get("/api/stream/:filename", (req, res) => {
 app.get("/api/download/:filename", (req, res) => {
   const filePath = safeFilename(req.params.filename);
   if (!filePath) return res.status(404).json({ error: "Not found" });
-  res.download(filePath, path.basename(filePath));
+  const suggested = req.query.name;
+  let downloadName = typeof suggested === "string" && suggested.trim()
+    ? (suggested.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim().slice(0, 200) || path.basename(filePath))
+    : path.basename(filePath);
+  if (!downloadName.toLowerCase().endsWith(".mp3")) downloadName = downloadName + ".mp3";
+  res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
+  res.type("audio/mpeg");
+  res.sendFile(filePath);
 });
 
 app.use((err, req, res, next) => {
