@@ -7,7 +7,6 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
-import ffmpeg from "fluent-ffmpeg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -67,14 +66,17 @@ const uploadStorage = multer.diskStorage({
 const uploadMulter = multer({ storage: uploadStorage, limits: { fileSize: 150 * 1024 * 1024 } });
 
 function getAudioDurationSeconds(filePath) {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) return reject(err);
-      const d = data?.format?.duration;
-      if (typeof d === "number" && d > 0) return resolve(d);
-      reject(new Error("Could not get duration"));
-    });
+  const result = spawnSync("ffprobe", ["-v", "quiet", "-print_format", "json", "-show_format", "-show_entries", "format=duration", filePath], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
   });
+  if (result.status !== 0) return Promise.reject(new Error(result.stderr || "ffprobe failed"));
+  try {
+    const data = JSON.parse(result.stdout || "{}");
+    const d = parseFloat(data?.format?.duration);
+    if (Number.isFinite(d) && d > 0) return Promise.resolve(d);
+  } catch (_) {}
+  return Promise.reject(new Error("Could not get duration"));
 }
 
 app.post("/api/upload", uploadMulter.single("file"), async (req, res) => {
@@ -315,15 +317,17 @@ function trimToDuration(inputPath, outputPath, durationSec) {
 }
 
 function trimToSegment(inputPath, outputPath, startSec, durationSec) {
-  return new Promise((resolve, reject) => {
-    const chain = ffmpeg(inputPath);
-    if (startSec > 0) chain.setStartTime(startSec);
-    chain.setDuration(durationSec);
-    if (outputPath.toLowerCase().endsWith(".wav")) {
-      chain.format("wav").outputOptions(["-acodec", "pcm_s16le"]);
-    }
-    chain.output(outputPath).on("end", () => resolve(outputPath)).on("error", reject).run();
-  });
+  const args = ["-y", "-ss", String(startSec), "-t", String(durationSec), "-i", inputPath];
+  if (outputPath.toLowerCase().endsWith(".wav")) {
+    args.push("-acodec", "pcm_s16le", "-f", "wav");
+  }
+  args.push(outputPath);
+  const result = spawnSync("ffmpeg", args, { stdio: "pipe", maxBuffer: 50 * 1024 * 1024 });
+  if (result.status !== 0) {
+    const errOut = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    return Promise.reject(new Error(errOut ? `ffmpeg trim failed: ${errOut.slice(0, 500)}` : "ffmpeg failed"));
+  }
+  return Promise.resolve(outputPath);
 }
 
 function concatWithCrossfade(inputPaths, durationsSec, outputPath, crossfadeMs) {
