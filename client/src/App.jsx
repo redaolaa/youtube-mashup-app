@@ -374,7 +374,11 @@ export default function App() {
   }, [urls, clipStarts, clipDurations, videoDurations]);
 
   const convertYouTubeClipsToUploads = useCallback(async (list, currentUrls, currentDurations, currentTitles) => {
-    const uniqueYoutubeUrls = [...new Set(list.filter((c) => getYouTubeVideoId(c.url)).map((c) => (c.url || "").trim().startsWith("http") ? c.url.trim() : "https://" + c.url.trim())))];
+    const youtubeUrls = list.filter((c) => getYouTubeVideoId(c.url)).map((c) => {
+      const u = (c.url || "").trim();
+      return u.startsWith("http") ? u : "https://" + u;
+    });
+    const uniqueYoutubeUrls = [...new Set(youtubeUrls)];
     const urlToUpload = {};
     for (const url of uniqueYoutubeUrls) {
       const res = await fetch(`${API}/convert`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
