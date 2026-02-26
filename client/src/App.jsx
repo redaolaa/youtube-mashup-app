@@ -304,7 +304,7 @@ export default function App() {
     setShowPreviewPanel(true);
     setLoading(true);
     setLoadingMode("preview");
-    const PREVIEW_TIMEOUT_MS = 8 * 60 * 1000; // 8 minutes (download + mix can be slow)
+    const PREVIEW_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes (full clips, multiple songs)
     const ac = new AbortController();
     const timeoutId = setTimeout(() => ac.abort(), PREVIEW_TIMEOUT_MS);
     try {
@@ -356,7 +356,7 @@ export default function App() {
       const isAbort = err.name === "AbortError";
       const isNetwork = msg.includes("fetch") || msg.includes("Network") || msg.includes("too long");
       if (isAbort) {
-        setError("Preview timed out (8 min). The server may still be working—check its terminal. Try again or use shorter clips.");
+        setError("Preview timed out (20 min). The server may still be working—check its terminal.");
       } else if (isNetwork) {
         setError(`${msg} Is the server running on port 5175?`);
       } else {
@@ -684,7 +684,7 @@ export default function App() {
           <div className="preview-panel-inner">
             <h3>Preview — clips converted to MP3, then mixed with crossfade</h3>
             {loading && loadingMode === "preview" ? (
-              <p className="preview-clip-label">Building preview… Downloading from YouTube and mixing (can take 2–5 min). Please wait.</p>
+              <p className="preview-clip-label">Building preview… Downloading and mixing your full trimmed clips. This can take several minutes depending on how many songs. Please wait.</p>
             ) : previewStreamUrl ? (
               <>
             <p className="preview-clip-label">
