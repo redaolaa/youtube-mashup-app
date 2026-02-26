@@ -41,6 +41,12 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "Server running" });
 });
 
+app.get("/api/status", (req, res) => {
+  const fromEnv = !!(process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim());
+  const fromFile = !!(process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE));
+  res.json({ ok: true, cookiesConfigured: fromEnv || fromFile });
+});
+
 function isYouTubeUrl(s) {
   if (typeof s !== "string" || !s.trim()) return false;
   try {
@@ -321,7 +327,9 @@ app.get("/api/video-info", (req, res) => {
       lastErrMsg = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
       if (!isBotOrSignInError(lastErrMsg)) break;
     }
-    return res.status(502).json({ error: friendlyYouTubeError(lastErrMsg) || "Could not get video info. The video may be private, region-locked, or unavailable." });
+    const friendly = friendlyYouTubeError(lastErrMsg) || "Could not get video info. The video may be private, region-locked, or unavailable.";
+    console.error("[video-info] yt-dlp failed:", lastErrMsg.slice(0, 400));
+    return res.status(502).json({ error: friendly });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Failed to get video info." });
   }
@@ -438,4 +446,8 @@ if (fs.existsSync(clientDist)) {
 }
 
 const PORT = process.env.PORT || 5175;
-app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  const cookiesFromEnv = !!(process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim());
+  const cookiesFromFile = !!(process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE));
+  console.log(`Server running at http://localhost:${PORT} | cookies: ${cookiesFromEnv || cookiesFromFile ? "configured" : "not set"}`);
+});
