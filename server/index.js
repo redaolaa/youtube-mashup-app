@@ -3,6 +3,7 @@ import cors from "cors";
 import { spawnSync, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 import ffmpeg from "fluent-ffmpeg";
@@ -112,7 +113,11 @@ function friendlyYouTubeError(rawMessage) {
   if (!rawMessage || typeof rawMessage !== "string") return rawMessage;
   const lower = rawMessage.toLowerCase();
   if (lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"))) {
-    return "This video couldn’t be loaded from our server. Try another video or run the app locally.";
+    const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
+    if (!hasCookies) {
+      return "This video couldn’t be loaded (YouTube is blocking the server). Fix: In Render → Environment, add YTDLP_COOKIES with base64 of your YouTube cookies (export from Chrome, base64 the file, paste). Or try another video / run the app locally.";
+    }
+    return "This video couldn’t be loaded from our server. Your cookies may have expired — export fresh cookies and update YTDLP_COOKIES on Render. Or try another video.";
   }
   if (lower.includes("requested format is not available") || lower.includes("format is not available")) {
     return "This video’s audio format isn’t available. Try another video.";
@@ -120,9 +125,14 @@ function friendlyYouTubeError(rawMessage) {
   return rawMessage.slice(0, 500);
 }
 
-function getYtDlpBaseArgs() {
+const YOUTUBE_PLAYER_CLIENTS = ["android,web", "ios", "tv_embedded", "mweb"];
+
+function getYtDlpBaseArgs(playerClient = null) {
   const args = ["--no-warnings", "--no-check-certificate"];
-  if (!process.env.YTDLP_COOKIES && !process.env.YTDLP_COOKIES_FILE) {
+  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
+  if (!hasCookies && playerClient) {
+    args.push("--extractor-args", `youtube:player_client=${playerClient}`);
+  } else if (!hasCookies) {
     args.push("--extractor-args", "youtube:player_client=android,web");
   }
   const cookiesPath = process.env.YTDLP_COOKIES_FILE;
@@ -132,60 +142,80 @@ function getYtDlpBaseArgs() {
   } else if (cookiesB64) {
     try {
       const decoded = Buffer.from(cookiesB64.trim(), "base64").toString("utf8");
-      const cookiePath = path.join(DOWNLOAD_DIR, ".cookies.txt");
       const withHeader = decoded.startsWith("#") ? decoded : "# Netscape HTTP Cookie File\n" + decoded;
+      const cookiePath = path.join(os.tmpdir(), "ytdlp_cookies.txt");
       fs.writeFileSync(cookiePath, withHeader, { mode: 0o600 });
       args.push("--cookies", cookiePath);
-    } catch (_) {}
+    } catch (e) {
+      console.error("[Cookies] Failed to write cookie file:", e.message);
+    }
   }
   return args;
+}
+
+function isBotOrSignInError(errMsg) {
+  if (!errMsg || typeof errMsg !== "string") return false;
+  const lower = errMsg.toLowerCase();
+  return lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"));
 }
 
 function downloadAudio(url, outPath, opts = {}) {
   const base = path.basename(outPath, ".mp3");
   const outTmpl = path.join(DOWNLOAD_DIR, `${base}.%(ext)s`);
   const ytdlp = findYtDlp();
-  const args = [
-    "--extract-audio",
-    "--audio-format", "best",
-    "-o", outTmpl,
-    ...getYtDlpBaseArgs(),
-    url,
-  ];
-  const result = spawnSync(ytdlp, args, {
-    encoding: "utf8",
-    maxBuffer: 50 * 1024 * 1024,
-    env: { ...process.env, PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" },
-  });
-  if (result.error) {
-    if (result.error.code === "ENOENT") {
-      throw new Error("yt-dlp not found. Install it with: brew install yt-dlp");
+  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
+  const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
+  let lastError = null;
+  for (const client of clientsToTry) {
+    for (const ext of ["m4a", "webm", "opus", "mp3"]) {
+      const alt = path.join(DOWNLOAD_DIR, `${base}.${ext}`);
+      try { if (fs.existsSync(alt)) fs.unlinkSync(alt); } catch (_) {}
     }
-    throw new Error(result.error.message || "yt-dlp failed to run");
-  }
-  if (result.status !== 0) {
-    const out = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    const msg = out || "yt-dlp exited with an error";
-    throw new Error(msg.slice(0, 800));
-  }
-  if (fs.existsSync(outPath)) return;
-  for (const ext of ["m4a", "webm", "opus", "mp3"]) {
-    const alt = path.join(DOWNLOAD_DIR, `${base}.${ext}`);
-    if (fs.existsSync(alt)) {
-      if (ext === "mp3") {
-        fs.renameSync(alt, outPath);
-        return;
+    const args = [
+      "--extract-audio",
+      "--audio-format", "best",
+      "-o", outTmpl,
+      ...getYtDlpBaseArgs(client),
+      url,
+    ];
+    const result = spawnSync(ytdlp, args, {
+      encoding: "utf8",
+      maxBuffer: 50 * 1024 * 1024,
+      env: { ...process.env, PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" },
+    });
+    if (result.error) {
+      if (result.error.code === "ENOENT") {
+        throw new Error("yt-dlp not found. Install it with: brew install yt-dlp");
       }
-      const conv = spawnSync("ffmpeg", ["-y", "-i", alt, "-acodec", "libmp3lame", "-q:a", "2", outPath], {
-        encoding: "utf8",
-        maxBuffer: 50 * 1024 * 1024,
-      });
-      fs.unlinkSync(alt);
-      if (conv.status !== 0) throw new Error(conv.stderr || "ffmpeg conversion failed");
-      return;
+      lastError = result.error.message;
+      if (isBotOrSignInError(lastError) && client !== clientsToTry[clientsToTry.length - 1]) continue;
+      throw new Error(lastError || "yt-dlp failed to run");
     }
+    if (result.status === 0) {
+      if (fs.existsSync(outPath)) return;
+      for (const ext of ["m4a", "webm", "opus", "mp3"]) {
+        const alt = path.join(DOWNLOAD_DIR, `${base}.${ext}`);
+        if (fs.existsSync(alt)) {
+          if (ext === "mp3") {
+            fs.renameSync(alt, outPath);
+            return;
+          }
+          const conv = spawnSync("ffmpeg", ["-y", "-i", alt, "-acodec", "libmp3lame", "-q:a", "2", outPath], {
+            encoding: "utf8",
+            maxBuffer: 50 * 1024 * 1024,
+          });
+          fs.unlinkSync(alt);
+          if (conv.status !== 0) throw new Error(conv.stderr || "ffmpeg conversion failed");
+          return;
+        }
+      }
+    }
+    const out = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    lastError = out || "yt-dlp exited with an error";
+    if (isBotOrSignInError(lastError) && client !== clientsToTry[clientsToTry.length - 1]) continue;
+    throw new Error(lastError.slice(0, 800));
   }
-  throw new Error("yt-dlp did not produce an audio file");
+  throw new Error(lastError || "yt-dlp did not produce an audio file");
 }
 
 function trimToDuration(inputPath, outputPath, durationSec) {
@@ -266,27 +296,32 @@ app.get("/api/video-info", (req, res) => {
     return res.status(400).json({ error: "Valid YouTube URL required." });
   }
   const cleanUrl = normalizeYouTubeUrl(url);
+  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
+  const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
+  let lastErrMsg = "";
   try {
     const ytdlp = findYtDlp();
-    const result = spawnSync(ytdlp, ["--dump-json", "-s", ...getYtDlpBaseArgs(), cleanUrl], {
-      encoding: "utf8",
-      maxBuffer: 2 * 1024 * 1024,
-      env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
-    });
-    if (result.error && result.error.code === "ENOENT") {
-      return res.status(503).json({ error: "yt-dlp not found." });
+    for (const client of clientsToTry) {
+      const result = spawnSync(ytdlp, ["--dump-json", "-s", ...getYtDlpBaseArgs(client), cleanUrl], {
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+        env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
+      });
+      if (result.error && result.error.code === "ENOENT") {
+        return res.status(503).json({ error: "yt-dlp not found." });
+      }
+      if (result.status === 0) {
+        const data = JSON.parse(result.stdout || "{}");
+        const duration = data.duration;
+        const title = data.title;
+        if (duration != null && typeof duration === "number" && duration > 0) {
+          return res.json({ duration: Math.floor(duration), title: typeof title === "string" ? title : null });
+        }
+      }
+      lastErrMsg = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+      if (!isBotOrSignInError(lastErrMsg)) break;
     }
-    if (result.status !== 0) {
-      const errMsg = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-      return res.status(502).json({ error: friendlyYouTubeError(errMsg) || "Could not get video info. The video may be private, region-locked, or unavailable." });
-    }
-    const data = JSON.parse(result.stdout || "{}");
-    const duration = data.duration;
-    const title = data.title;
-    if (duration == null || typeof duration !== "number" || duration <= 0) {
-      return res.status(400).json({ error: "Video has no duration (live stream?)." });
-    }
-    return res.json({ duration: Math.floor(duration), title: typeof title === "string" ? title : null });
+    return res.status(502).json({ error: friendlyYouTubeError(lastErrMsg) || "Could not get video info. The video may be private, region-locked, or unavailable." });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Failed to get video info." });
   }
