@@ -114,6 +114,9 @@ function friendlyYouTubeError(rawMessage) {
   if (lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"))) {
     return "This video couldn’t be loaded from our server. Try another video or run the app locally.";
   }
+  if (lower.includes("requested format is not available") || lower.includes("format is not available")) {
+    return "This video’s audio format isn’t available. Try another video.";
+  }
   return rawMessage.slice(0, 500);
 }
 
@@ -144,8 +147,7 @@ function downloadAudio(url, outPath, opts = {}) {
   const ytdlp = findYtDlp();
   const args = [
     "--extract-audio",
-    "--audio-format", "mp3",
-    "--audio-quality", "192",
+    "--audio-format", "best",
     "-o", outTmpl,
     ...getYtDlpBaseArgs(),
     url,
