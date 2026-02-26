@@ -167,6 +167,13 @@ function isBotOrSignInError(errMsg) {
   return lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"));
 }
 
+function isFormatNotAvailableError(errMsg) {
+  if (!errMsg || typeof errMsg !== "string") return false;
+  return errMsg.toLowerCase().includes("requested format is not available") || errMsg.toLowerCase().includes("format is not available");
+}
+
+const DOWNLOAD_FORMAT_FALLBACKS = ["best", "bestaudio/best", "worst"];
+
 function downloadAudio(url, outPath, opts = {}) {
   const base = path.basename(outPath, ".mp3");
   const outTmpl = path.join(DOWNLOAD_DIR, `${base}.%(ext)s`);
@@ -175,53 +182,63 @@ function downloadAudio(url, outPath, opts = {}) {
   const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
   let lastError = null;
   for (const client of clientsToTry) {
-    for (const ext of ["m4a", "webm", "opus", "mp3"]) {
-      const alt = path.join(DOWNLOAD_DIR, `${base}.${ext}`);
-      try { if (fs.existsSync(alt)) fs.unlinkSync(alt); } catch (_) {}
-    }
-    const args = [
-      "--extract-audio",
-      "-f", "best",
-      "-o", outTmpl,
-      ...getYtDlpBaseArgs(client),
-      url,
-    ];
-    const result = spawnSync(ytdlp, args, {
-      encoding: "utf8",
-      maxBuffer: 50 * 1024 * 1024,
-      env: { ...process.env, PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" },
-    });
-    if (result.error) {
-      if (result.error.code === "ENOENT") {
-        throw new Error("yt-dlp not found. Install it with: brew install yt-dlp");
-      }
-      lastError = result.error.message;
-      if (isBotOrSignInError(lastError) && client !== clientsToTry[clientsToTry.length - 1]) continue;
-      throw new Error(lastError || "yt-dlp failed to run");
-    }
-    if (result.status === 0) {
-      if (fs.existsSync(outPath)) return;
+    for (const formatStr of DOWNLOAD_FORMAT_FALLBACKS) {
       for (const ext of ["m4a", "webm", "opus", "mp3"]) {
         const alt = path.join(DOWNLOAD_DIR, `${base}.${ext}`);
-        if (fs.existsSync(alt)) {
-          if (ext === "mp3") {
-            fs.renameSync(alt, outPath);
+        try { if (fs.existsSync(alt)) fs.unlinkSync(alt); } catch (_) {}
+      }
+      const args = [
+        "--extract-audio",
+        "-f", formatStr,
+        "-o", outTmpl,
+        ...getYtDlpBaseArgs(client),
+        url,
+      ];
+      const result = spawnSync(ytdlp, args, {
+        encoding: "utf8",
+        maxBuffer: 50 * 1024 * 1024,
+        env: { ...process.env, PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" },
+      });
+      if (result.error) {
+        if (result.error.code === "ENOENT") {
+          throw new Error("yt-dlp not found. Install it with: brew install yt-dlp");
+        }
+        lastError = result.error.message;
+        if (isFormatNotAvailableError(lastError)) {
+          if (formatStr !== DOWNLOAD_FORMAT_FALLBACKS[DOWNLOAD_FORMAT_FALLBACKS.length - 1]) continue;
+          break;
+        }
+        if (isBotOrSignInError(lastError) && client !== clientsToTry[clientsToTry.length - 1]) break;
+        throw new Error(lastError || "yt-dlp failed to run");
+      }
+      if (result.status === 0) {
+        if (fs.existsSync(outPath)) return;
+        for (const ext of ["m4a", "webm", "opus", "mp3"]) {
+          const alt = path.join(DOWNLOAD_DIR, `${base}.${ext}`);
+          if (fs.existsSync(alt)) {
+            if (ext === "mp3") {
+              fs.renameSync(alt, outPath);
+              return;
+            }
+            const conv = spawnSync("ffmpeg", ["-y", "-i", alt, "-acodec", "libmp3lame", "-q:a", "2", outPath], {
+              encoding: "utf8",
+              maxBuffer: 50 * 1024 * 1024,
+            });
+            fs.unlinkSync(alt);
+            if (conv.status !== 0) throw new Error(conv.stderr || "ffmpeg conversion failed");
             return;
           }
-          const conv = spawnSync("ffmpeg", ["-y", "-i", alt, "-acodec", "libmp3lame", "-q:a", "2", outPath], {
-            encoding: "utf8",
-            maxBuffer: 50 * 1024 * 1024,
-          });
-          fs.unlinkSync(alt);
-          if (conv.status !== 0) throw new Error(conv.stderr || "ffmpeg conversion failed");
-          return;
         }
       }
+      const out = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+      lastError = out || "yt-dlp exited with an error";
+      if (isFormatNotAvailableError(lastError)) {
+        if (formatStr !== DOWNLOAD_FORMAT_FALLBACKS[DOWNLOAD_FORMAT_FALLBACKS.length - 1]) continue;
+        break;
+      }
+      if (isBotOrSignInError(lastError) && client !== clientsToTry[clientsToTry.length - 1]) break;
+      throw new Error(lastError.slice(0, 800));
     }
-    const out = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    lastError = out || "yt-dlp exited with an error";
-    if (isBotOrSignInError(lastError) && client !== clientsToTry[clientsToTry.length - 1]) continue;
-    throw new Error(lastError.slice(0, 800));
   }
   throw new Error(lastError || "yt-dlp did not produce an audio file");
 }
