@@ -108,6 +108,34 @@ function findYtDlp() {
   return name;
 }
 
+function friendlyYouTubeError(rawMessage) {
+  if (!rawMessage || typeof rawMessage !== "string") return rawMessage;
+  const lower = rawMessage.toLowerCase();
+  if (lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"))) {
+    return "This video couldn’t be loaded from our server. Try another video or run the app locally.";
+  }
+  return rawMessage.slice(0, 500);
+}
+
+function getYtDlpBaseArgs() {
+  const args = ["--no-warnings", "--no-check-certificate"];
+  if (!process.env.YTDLP_COOKIES && !process.env.YTDLP_COOKIES_FILE) {
+    args.push("--extractor-args", "youtube:player_client=android,web");
+  }
+  const cookiesPath = process.env.YTDLP_COOKIES_FILE;
+  const cookiesB64 = process.env.YTDLP_COOKIES;
+  if (cookiesPath && fs.existsSync(cookiesPath)) {
+    args.push("--cookies", cookiesPath);
+  } else if (cookiesB64) {
+    try {
+      const cookiePath = path.join(DOWNLOAD_DIR, ".cookies.txt");
+      fs.writeFileSync(cookiePath, Buffer.from(cookiesB64, "base64").toString("utf8"), { mode: 0o600 });
+      args.push("--cookies", cookiePath);
+    } catch (_) {}
+  }
+  return args;
+}
+
 function downloadAudio(url, outPath, opts = {}) {
   const base = path.basename(outPath, ".mp3");
   const outTmpl = path.join(DOWNLOAD_DIR, `${base}.%(ext)s`);
@@ -117,8 +145,7 @@ function downloadAudio(url, outPath, opts = {}) {
     "--audio-format", "mp3",
     "--audio-quality", "192",
     "-o", outTmpl,
-    "--no-warnings",
-    "--no-check-certificate",
+    ...getYtDlpBaseArgs(),
     url,
   ];
   const result = spawnSync(ytdlp, args, {
@@ -237,7 +264,7 @@ app.get("/api/video-info", (req, res) => {
   const cleanUrl = normalizeYouTubeUrl(url);
   try {
     const ytdlp = findYtDlp();
-    const result = spawnSync(ytdlp, ["--dump-json", "-s", "--no-warnings", cleanUrl], {
+    const result = spawnSync(ytdlp, ["--dump-json", "-s", ...getYtDlpBaseArgs(), cleanUrl], {
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
@@ -247,7 +274,7 @@ app.get("/api/video-info", (req, res) => {
     }
     if (result.status !== 0) {
       const errMsg = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-      return res.status(502).json({ error: errMsg || "Could not get video info. The video may be private, region-locked, or unavailable." });
+      return res.status(502).json({ error: friendlyYouTubeError(errMsg) || "Could not get video info. The video may be private, region-locked, or unavailable." });
     }
     const data = JSON.parse(result.stdout || "{}");
     const duration = data.duration;
@@ -321,7 +348,8 @@ app.post("/api/mashup", async (req, res) => {
   } catch (err) {
     console.error("[Mashup]", err);
     clipPaths.forEach((p) => { try { fs.unlinkSync(p); } catch (_) {} });
-    return res.status(500).json({ error: err.message || "Failed to generate mashup." });
+    const msg = friendlyYouTubeError(err.message) || err.message || "Failed to generate mashup.";
+    return res.status(500).json({ error: msg });
   }
 });
 
