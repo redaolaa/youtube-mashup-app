@@ -5,6 +5,8 @@ import { spawnSync, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 
@@ -182,22 +184,85 @@ function findYtDlp() {
   return name;
 }
 
+const FRIENDLY_VIDEO_BLOCKED = "This video couldn't be loaded from our server. Try another video or upload an MP3 file instead.";
+
 function friendlyYouTubeError(rawMessage) {
-  if (!rawMessage || typeof rawMessage !== "string") return rawMessage;
-  const lower = rawMessage.toLowerCase();
-  if (lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"))) {
-    return "This video couldn’t be loaded from our server. Try another video or upload an MP3 file instead.";
+  if (rawMessage == null) return FRIENDLY_VIDEO_BLOCKED;
+  const s = String(rawMessage);
+  const lower = s.toLowerCase();
+  if (lower.includes("sign in") || lower.includes("not a bot") || lower.includes("confirm you're not a bot") || (lower.includes("cookies") && lower.includes("bot"))) {
+    return FRIENDLY_VIDEO_BLOCKED;
   }
   if (lower.includes("requested format is not available") || lower.includes("format is not available")) {
-    return "This video’s audio format isn’t available. Try another video.";
+    return "This video's audio format isn't available. Try another video.";
   }
-  return rawMessage.slice(0, 500);
+  return s.slice(0, 500);
 }
 
 const YOUTUBE_PLAYER_CLIENTS = ["android,web", "ios", "tv_embedded", "mweb"];
+const COBALT_USER_AGENT = "YouTube-Mashup/1.0 (+https://github.com)";
+const COBALT_INSTANCES_URL = "https://instances.cobalt.best/instances.json";
 
-function getYtDlpBaseArgs(playerClient = null) {
+let _cobaltBaseUrlCache = null;
+async function getCobaltBaseUrl() {
+  if (_cobaltBaseUrlCache !== undefined) return _cobaltBaseUrlCache;
+  const envUrl = process.env.COBALT_API_URL;
+  if (envUrl && typeof envUrl === "string" && envUrl.trim()) {
+    _cobaltBaseUrlCache = envUrl.trim().replace(/\/$/, "");
+    return _cobaltBaseUrlCache;
+  }
+  try {
+    const r = await fetch(COBALT_INSTANCES_URL, {
+      headers: { "User-Agent": COBALT_USER_AGENT },
+    });
+    if (!r.ok) throw new Error(r.status);
+    const list = await r.json();
+    const candidates = Array.isArray(list)
+      ? list.filter((i) => i.online === true && i.services?.youtube === true && i.protocol && i.api)
+      : [];
+    const instance = candidates.length > 0
+      ? candidates.sort((a, b) => (a.info?.auth ? 1 : 0) - (b.info?.auth ? 1 : 0))[0]
+      : null;
+    if (instance) {
+      _cobaltBaseUrlCache = `${instance.protocol}://${instance.api}`.replace(/\/$/, "");
+    } else {
+      _cobaltBaseUrlCache = null;
+    }
+  } catch (_) {
+    _cobaltBaseUrlCache = null;
+  }
+  return _cobaltBaseUrlCache;
+}
+
+let _cookiePathCache = null;
+function getCookiePath() {
+  if (_cookiePathCache !== undefined) return _cookiePathCache;
+  _cookiePathCache = null;
+  const fileEnv = process.env.YTDLP_COOKIES_FILE;
+  if (fileEnv && fs.existsSync(fileEnv)) {
+    _cookiePathCache = path.resolve(fileEnv);
+    return _cookiePathCache;
+  }
+  const b64 = process.env.YTDLP_COOKIES;
+  if (b64 && typeof b64 === "string" && b64.trim()) {
+    try {
+      const decoded = Buffer.from(b64.trim(), "base64").toString("utf8");
+      if (decoded && decoded.length > 0) {
+        const cookiePath = path.join(DOWNLOAD_DIR, "ytdlp_cookies.txt");
+        fs.writeFileSync(cookiePath, decoded, "utf8");
+        _cookiePathCache = cookiePath;
+        return _cookiePathCache;
+      }
+    } catch (_) {}
+  }
+  return _cookiePathCache;
+}
+
+function getYtDlpBaseArgs(playerClient = null, cookiePath = null) {
   const args = ["--no-warnings", "--no-check-certificate"];
+  if (cookiePath && fs.existsSync(cookiePath)) {
+    args.push("--cookies", cookiePath);
+  }
   if (playerClient) {
     args.push("--extractor-args", `youtube:player_client=${playerClient}`);
   } else {
@@ -217,13 +282,65 @@ function isFormatNotAvailableError(errMsg) {
   return errMsg.toLowerCase().includes("requested format is not available") || errMsg.toLowerCase().includes("format is not available");
 }
 
+/** Cobalt API fallback when yt-dlp hits bot check. Returns Promise<void> or throws. */
+async function downloadAudioViaCobalt(youtubeUrl, outPath) {
+  const baseUrl = await getCobaltBaseUrl();
+  if (!baseUrl) throw new Error("No Cobalt instance available. Set COBALT_API_URL or check instances.cobalt.best.");
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": COBALT_USER_AGENT,
+  };
+  const apiKey = process.env.COBALT_API_KEY;
+  if (apiKey && typeof apiKey === "string" && apiKey.trim()) {
+    headers.Authorization = `Api-Key ${apiKey.trim()}`;
+  }
+  const res = await fetch(`${baseUrl}/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      url: youtubeUrl,
+      downloadMode: "audio",
+      audioFormat: "mp3",
+      audioBitrate: "128",
+    }),
+  });
+  if (!res.ok) throw new Error(`Cobalt API error: ${res.status}`);
+  const data = await res.json();
+  if (data.status === "error") {
+    const code = data.error?.code || "unknown";
+    const ctx = data.error?.context;
+    const limit = ctx?.limit ? ` (limit: ${ctx.limit}s)` : "";
+    throw new Error(`Cobalt: ${code}${limit}`);
+  }
+  let downloadUrl = data.url;
+  if (!downloadUrl && data.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
+    const first = data.picker[0];
+    downloadUrl = first?.url || (data.audio && data.status === "picker" ? data.audio : null);
+  }
+  if (!downloadUrl || typeof downloadUrl !== "string") throw new Error("Cobalt did not return a download URL");
+  const fileRes = await fetch(downloadUrl, {
+    headers: { "User-Agent": COBALT_USER_AGENT },
+  });
+  if (!fileRes.ok) throw new Error(`Failed to fetch MP3: ${fileRes.status}`);
+  if (typeof Readable.fromWeb === "function") {
+    const dest = fs.createWriteStream(outPath);
+    await pipeline(Readable.fromWeb(fileRes.body), dest);
+  } else {
+    const chunks = [];
+    for await (const chunk of fileRes.body) chunks.push(chunk);
+    fs.writeFileSync(outPath, Buffer.concat(chunks));
+  }
+}
+
 const DOWNLOAD_FORMAT_FALLBACKS = ["best", "bestaudio/best", "worst"];
 
 function downloadAudio(url, outPath, opts = {}) {
   const base = path.basename(outPath, ".mp3");
   const outTmpl = path.join(DOWNLOAD_DIR, `${base}.%(ext)s`);
   const ytdlp = findYtDlp();
-  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
+  const cookiePath = getCookiePath();
+  const hasCookies = !!cookiePath;
   const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
   let lastError = null;
   for (const client of clientsToTry) {
@@ -236,7 +353,7 @@ function downloadAudio(url, outPath, opts = {}) {
         "--extract-audio",
         "-f", formatStr,
         "-o", outTmpl,
-        ...getYtDlpBaseArgs(client),
+        ...getYtDlpBaseArgs(client, cookiePath),
         url,
       ];
       const result = spawnSync(ytdlp, args, {
@@ -363,10 +480,11 @@ function concatWithCrossfade(inputPaths, durationsSec, outputPath, crossfadeMs) 
 }
 
 function getVideoMetadata(cleanUrl) {
-  const clientsToTry = [null, ...YOUTUBE_PLAYER_CLIENTS];
+  const cookiePath = getCookiePath();
+  const clientsToTry = cookiePath ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
   const ytdlp = findYtDlp();
   for (const client of clientsToTry) {
-    const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client), cleanUrl], {
+    const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client, cookiePath), cleanUrl], {
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
@@ -397,12 +515,13 @@ app.get("/api/video-info", (req, res) => {
     return res.status(400).json({ error: "Valid YouTube URL required." });
   }
   const cleanUrl = normalizeYouTubeUrl(url);
-  const clientsToTry = [null, ...YOUTUBE_PLAYER_CLIENTS];
+  const cookiePath = getCookiePath();
+  const clientsToTry = cookiePath ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
   let lastErrMsg = "";
   try {
     const ytdlp = findYtDlp();
     for (const client of clientsToTry) {
-      const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client), cleanUrl], {
+      const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client, cookiePath), cleanUrl], {
         encoding: "utf8",
         maxBuffer: 2 * 1024 * 1024,
         env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
@@ -490,7 +609,16 @@ app.post("/api/mashup", async (req, res) => {
         const clipUrl = normalizeYouTubeUrl(url);
         rawPath = path.join(DOWNLOAD_DIR, `clip_${clipId}.mp3`);
         console.log(`[Mashup] Downloading clip ${i + 1}/${list.length} …`);
-        downloadAudio(clipUrl, rawPath);
+        try {
+          downloadAudio(clipUrl, rawPath);
+        } catch (ytErr) {
+          if (isBotOrSignInError(ytErr?.message)) {
+            console.log(`[Mashup] Clip ${i + 1} yt-dlp blocked; trying Cobalt API …`);
+            await downloadAudioViaCobalt(clipUrl, rawPath);
+          } else {
+            throw ytErr;
+          }
+        }
         console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${startSec}s–${startSec + durationSec}s …`);
       }
       await trimToSegment(rawPath, trimPath, startSec, durationSec);
@@ -557,7 +685,16 @@ app.post("/api/convert", async (req, res) => {
     const meta = getVideoMetadata(cleanUrl);
     if (meta?.title) title = meta.title;
     console.log("[Convert] Downloading full audio …");
-    downloadAudio(cleanUrl, outPath);
+    try {
+      downloadAudio(cleanUrl, outPath);
+    } catch (ytErr) {
+      if (isBotOrSignInError(ytErr?.message)) {
+        console.log("[Convert] yt-dlp blocked; trying Cobalt API fallback …");
+        await downloadAudioViaCobalt(cleanUrl, outPath);
+      } else {
+        throw ytErr;
+      }
+    }
     const duration = await getAudioDurationSeconds(outPath);
     const filename = `upload_${id}.mp3`;
     return res.json({
@@ -569,9 +706,14 @@ app.post("/api/convert", async (req, res) => {
       downloadUrl: `/api/download/${filename}`,
     });
   } catch (err) {
-    console.error("[Convert]", err);
+    const raw = err?.message;
+    const msg = friendlyYouTubeError(raw) || raw || "Failed to convert.";
+    if (raw && msg === FRIENDLY_VIDEO_BLOCKED) {
+      console.error("[Convert] Video blocked by YouTube (bot check). Returning friendly message.");
+    } else {
+      console.error("[Convert]", raw?.slice(0, 200) || err);
+    }
     try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch (_) {}
-    const msg = friendlyYouTubeError(err.message) || err.message || "Failed to convert.";
     return res.status(502).json({ error: msg });
   }
 });
@@ -631,4 +773,7 @@ if (fs.existsSync(clientDist)) {
 const PORT = process.env.PORT || 5175;
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
+  getCobaltBaseUrl().then((url) => {
+    if (url) console.log("[Cobalt] Fallback instance ready:", url);
+  }).catch(() => {});
 });
