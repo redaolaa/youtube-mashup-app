@@ -181,7 +181,7 @@ function downloadAudio(url, outPath, opts = {}) {
     }
     const args = [
       "--extract-audio",
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+      "-f", "bestaudio/best",
       "-o", outTmpl,
       ...getYtDlpBaseArgs(client),
       url,
@@ -310,7 +310,7 @@ app.get("/api/video-info", (req, res) => {
   try {
     const ytdlp = findYtDlp();
     for (const client of clientsToTry) {
-      const result = spawnSync(ytdlp, ["--dump-json", "-s", ...getYtDlpBaseArgs(client), cleanUrl], {
+      const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client), cleanUrl], {
         encoding: "utf8",
         maxBuffer: 2 * 1024 * 1024,
         env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
