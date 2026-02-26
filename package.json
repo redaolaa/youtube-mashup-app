@@ -4,6 +4,8 @@
   "scripts": {
     "build": "cd client && npm run build",
     "start": "cd server && node index.js",
+    "run": "npm run build && npm start",
+    "dev": "cd server && npm run dev",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev"
   }

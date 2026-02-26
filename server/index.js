@@ -36,6 +36,10 @@ cleanupOldFiles();
 app.use(cors());
 app.use(express.json());
 
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, message: "Server running" });
+});
+
 function isYouTubeUrl(s) {
   if (typeof s !== "string" || !s.trim()) return false;
   try {
@@ -46,6 +50,26 @@ function isYouTubeUrl(s) {
   } catch {
     return false;
   }
+}
+
+function normalizeYouTubeUrl(s) {
+  if (typeof s !== "string" || !s.trim()) return s;
+  try {
+    const raw = s.trim();
+    const u = new URL(raw.startsWith("http") ? raw : "https://" + raw);
+    const host = u.hostname.toLowerCase();
+    if (host === "youtu.be") {
+      const id = u.pathname.slice(1).split("/")[0].split("?")[0];
+      return id ? `https://www.youtube.com/watch?v=${id}` : raw;
+    }
+    if (host.includes("youtube")) {
+      const v = u.searchParams.get("v");
+      if (v) return `https://www.youtube.com/watch?v=${v}`;
+      const match = u.pathname.match(/^\/(?:shorts|live)\/([a-zA-Z0-9_-]{10,})/);
+      if (match) return `https://www.youtube.com/watch?v=${match[1]}`;
+    }
+  } catch (_) {}
+  return s;
 }
 
 function safeFilename(name) {
@@ -84,7 +108,7 @@ function findYtDlp() {
   return name;
 }
 
-function downloadAudio(url, outPath) {
+function downloadAudio(url, outPath, opts = {}) {
   const base = path.basename(outPath, ".mp3");
   const outTmpl = path.join(DOWNLOAD_DIR, `${base}.%(ext)s`);
   const ytdlp = findYtDlp();
@@ -210,9 +234,10 @@ app.get("/api/video-info", (req, res) => {
   if (!url || !isYouTubeUrl(url)) {
     return res.status(400).json({ error: "Valid YouTube URL required." });
   }
+  const cleanUrl = normalizeYouTubeUrl(url);
   try {
     const ytdlp = findYtDlp();
-    const result = spawnSync(ytdlp, ["--dump-json", "-s", "--no-warnings", url], {
+    const result = spawnSync(ytdlp, ["--dump-json", "-s", "--no-warnings", cleanUrl], {
       encoding: "utf8",
       maxBuffer: 2 * 1024 * 1024,
       env: { ...process.env, PATH: process.env.PATH || FALLBACK_PATH },
@@ -221,7 +246,8 @@ app.get("/api/video-info", (req, res) => {
       return res.status(503).json({ error: "yt-dlp not found." });
     }
     if (result.status !== 0) {
-      return res.status(502).json({ error: result.stderr || "Could not get video info." });
+      const errMsg = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+      return res.status(502).json({ error: errMsg || "Could not get video info. The video may be private, region-locked, or unavailable." });
     }
     const data = JSON.parse(result.stdout || "{}");
     const duration = data.duration;
@@ -233,10 +259,6 @@ app.get("/api/video-info", (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message || "Failed to get video info." });
   }
-});
-
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true });
 });
 
 app.post("/api/mashup", async (req, res) => {
@@ -270,9 +292,10 @@ app.post("/api/mashup", async (req, res) => {
   }
 
   if (preview) {
-    list = list.slice(0, 2);
-    const maxPreviewSec = 12;
-    list = list.map((c) => ({ ...c, duration: Math.min(Number(c.duration) || 10, maxPreviewSec) }));
+    list = list.slice(0, 2).map((c) => ({
+      ...c,
+      duration: Math.min(12, c.duration || defaultDuration),
+    }));
   }
 
   const clipPaths = [];
@@ -280,10 +303,11 @@ app.post("/api/mashup", async (req, res) => {
   try {
     for (let i = 0; i < list.length; i++) {
       const { url, start: startSec, duration: durationSec } = list[i];
+      const clipUrl = normalizeYouTubeUrl(url);
       const clipId = uuidv4().replace(/-/g, "");
       const rawPath = path.join(DOWNLOAD_DIR, `clip_${clipId}.mp3`);
       console.log(`[Mashup] Downloading clip ${i + 1}/${list.length} …`);
-      downloadAudio(url, rawPath);
+      downloadAudio(clipUrl, rawPath);
       console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${startSec}s–${startSec + durationSec}s …`);
       const trimPath = path.join(DOWNLOAD_DIR, `trim_${clipId}.wav`);
       await trimToSegment(rawPath, trimPath, startSec, durationSec);
@@ -312,6 +336,7 @@ app.get("/api/stream/:filename", (req, res) => {
   const filePath = safeFilename(req.params.filename);
   if (!filePath) return res.status(404).send("Not found");
   res.type("audio/mpeg");
+  res.setHeader("Cache-Control", "no-store");
   res.sendFile(filePath);
 });
 
@@ -337,6 +362,18 @@ if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
   app.get("*", (req, res) => {
     res.sendFile(path.join(clientDist, "index.html"));
+  });
+} else {
+  app.get("/", (req, res) => {
+    res.type("html").send(`
+      <!DOCTYPE html><html><head><title>YouTube Mashup</title></head><body>
+        <h1>Server is running</h1>
+        <p>To use the app from this port (one server only), from the project root run:</p>
+        <p><code>npm run run</code></p>
+        <p>That builds the client and restarts the server so this page becomes the app. Then refresh.</p>
+        <p>Or use two terminals: this server + <code>npm run dev:client</code>, then open <a href="http://localhost:5173">http://localhost:5173</a>.</p>
+      </body></html>
+    `);
   });
 }
 

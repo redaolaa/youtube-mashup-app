@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
+// Use relative /api so Vite proxies to 5175 when on 5173 (avoids cross-origin "Failed to fetch")
 const API = "/api";
-const MASHUP_TIMEOUT_MS = 180000; // 3 min (cold start + generate)
 
 function formatTime(sec) {
   const m = Math.floor(sec / 60);
@@ -163,13 +163,19 @@ export default function App() {
   const [loopPreview, setLoopPreview] = useState(false);
   const [previewFileName, setPreviewFileName] = useState(() => localStorage.getItem("mashupPreviewFileName") || "my-preview");
   const previewAudioRef = useRef(null);
+  const previewPanelRef = useRef(null);
+  const errorRef = useRef(null);
   const dragIndexRef = useRef(null);
   const [skippedForPreview, setSkippedForPreview] = useState([]);
+  const [serverOk, setServerOk] = useState(null);
 
   useEffect(() => {
-    const ac = new AbortController();
-    fetch(`${API}/health`, { signal: ac.signal }).catch(() => {});
-    return () => ac.abort();
+    let cancelled = false;
+    fetch(`${API}/health`)
+      .then((r) => r.ok)
+      .then((ok) => { if (!cancelled) setServerOk(ok); })
+      .catch(() => { if (!cancelled) setServerOk(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const addUrl = () => {
@@ -295,11 +301,13 @@ export default function App() {
     setSkippedForPreview(urls.map((_, i) => !included.has(i)));
     setError("");
     setPreviewStreamUrl(null);
+    setShowPreviewPanel(true);
     setLoading(true);
     setLoadingMode("preview");
+    const PREVIEW_TIMEOUT_MS = 8 * 60 * 1000; // 8 minutes (download + mix can be slow)
+    const ac = new AbortController();
+    const timeoutId = setTimeout(() => ac.abort(), PREVIEW_TIMEOUT_MS);
     try {
-      const ac = new AbortController();
-      const to = setTimeout(() => ac.abort(), MASHUP_TIMEOUT_MS);
       const res = await fetch(`${API}/mashup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -312,39 +320,48 @@ export default function App() {
         }),
         signal: ac.signal,
       });
-      clearTimeout(to);
+      clearTimeout(timeoutId);
       const text = await res.text();
       let data;
       try {
         data = text ? JSON.parse(text) : {};
       } catch (_) {
         setError(res.ok ? "Invalid response from server." : `Preview failed (${res.status}). Server may be down or returned an error.`);
+        setShowPreviewPanel(false);
+        setTimeout(() => errorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 0);
         return;
       }
       if (!res.ok) {
-        const isTimeout = res.status === 502 || res.status === 504;
-        const msg = isTimeout
-          ? "Preview timed out (server limit). Try 1–2 short clips or use Generate MP3 for the full mix."
-          : (data.error || (text && text.slice(0, 200)) || `Preview failed (${res.status}).`);
+        const msg = data.error || (text && text.slice(0, 200)) || `Preview failed (${res.status}).`;
         setError(msg);
+        setShowPreviewPanel(false);
+        setTimeout(() => errorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 0);
         return;
       }
       if (!data.streamUrl) {
         setError("Preview returned no audio URL.");
+        setShowPreviewPanel(false);
+        setTimeout(() => errorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 0);
         return;
       }
       setPrevPreviewStreamUrl((prev) => previewStreamUrl || prev);
-      setPreviewStreamUrl(data.streamUrl);
+      setPreviewStreamUrl(data.streamUrl.startsWith("/") ? data.streamUrl : "/" + data.streamUrl);
       setPreviewABChoice("current");
       setShowPreviewPanel(true);
     } catch (err) {
+      clearTimeout(timeoutId);
+      setShowPreviewPanel(false);
+      setTimeout(() => errorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 0);
+      const msg = err.message || "Preview failed.";
       const isAbort = err.name === "AbortError";
-      const msg = isAbort ? "Request took too long." : (err.message || "Preview failed.");
-      const isNetwork = isAbort || msg.includes("fetch") || msg.includes("Network");
-      const hint = typeof window !== "undefined" && window.location.hostname === "localhost"
-        ? " Is the server running on port 5175?"
-        : " The server may be waking up—try again in a minute.";
-      setError(isNetwork ? `${msg} ${hint}` : msg);
+      const isNetwork = msg.includes("fetch") || msg.includes("Network") || msg.includes("too long");
+      if (isAbort) {
+        setError("Preview timed out (8 min). The server may still be working—check its terminal. Try again or use shorter clips.");
+      } else if (isNetwork) {
+        setError(`${msg} Is the server running on port 5175?`);
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
       setLoadingMode(null);
@@ -357,6 +374,12 @@ export default function App() {
   }, [loopPreview, previewStreamUrl, prevPreviewStreamUrl]);
 
   useEffect(() => {
+    if (showPreviewPanel && loading && loadingMode === "preview") {
+      previewPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [showPreviewPanel, loading, loadingMode]);
+
+  useEffect(() => {
     urls.forEach((u, i) => {
       const id = getYouTubeVideoId(u);
       if (!id || durationLoading[i]) return;
@@ -364,20 +387,23 @@ export default function App() {
       setDurationLoading((prev) => ({ ...prev, [i]: true }));
       const url = u.trim().startsWith("http") ? u.trim() : "https://" + u.trim();
       fetch(`${API}/video-info?url=${encodeURIComponent(url)}`)
-        .then((r) => r.text().then((t) => ({ ok: r.ok, text: t })))
-        .then(({ ok, text }) => {
+        .then((r) => r.text().then((t) => ({ ok: r.ok, status: r.status, text: t })))
+        .then(({ ok, status, text }) => {
           let data = {};
           try {
             data = text ? JSON.parse(text) : {};
           } catch (_) {}
-          if (data.duration != null) {
+          if (ok && data.duration != null) {
             setVideoDurations((prev) => prev.map((d, j) => (j === i ? data.duration : d)));
             setClipDurations((prev) =>
               prev.map((d, j) => (j === i && (d == null || d === "")) ? Math.min(30, data.duration) : d)
             );
           }
-          if (data.title) {
+          if (ok && data.title) {
             setSongTitles((prev) => prev.map((t, j) => (j === i ? data.title : t)));
+          }
+          if (!ok && data.error) {
+            setError(`Could not load video info: ${(data.error || "Video may be private or unavailable.").slice(0, 180)}`);
           }
         })
         .catch(() => {})
@@ -430,15 +456,11 @@ export default function App() {
         duration: defaultDur,
         crossfade: Number(crossfade) || 2500,
       };
-      const ac = new AbortController();
-      const to = setTimeout(() => ac.abort(), MASHUP_TIMEOUT_MS);
       const res = await fetch(`${API}/mashup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: ac.signal,
       });
-      clearTimeout(to);
       const text = await res.text();
       let data;
       try {
@@ -454,13 +476,7 @@ export default function App() {
       }
       setResult(data);
     } catch (err) {
-      const isAbort = err.name === "AbortError";
-      const msg = isAbort ? "Request took too long." : (err.message || "Request failed.");
-      const isNetwork = isAbort || msg.includes("fetch") || msg.includes("Network");
-      const hint = typeof window !== "undefined" && window.location.hostname === "localhost"
-        ? " Is the server running on port 5175?"
-        : " The server may be waking up—try again in a minute.";
-      setError(isNetwork ? `${msg} ${hint}` : msg);
+      setError(err.message || "Request failed.");
     } finally {
       setLoading(false);
       setLoadingMode(null);
@@ -647,6 +663,14 @@ export default function App() {
           </button>
         </div>
 
+        {serverOk === false && (
+          <p className="error" style={{ marginBottom: "0.5rem" }}>
+            Server not connected. Start it: <code>cd youtube-mashup-app && npm start</code> then run the client on port 5173.
+          </p>
+        )}
+        {serverOk === true && (
+          <p style={{ fontSize: "0.85rem", color: "var(--text-muted, #666)", marginBottom: "0.5rem" }}>Server connected</p>
+        )}
         <button type="button" className="btn-preview" onClick={startPreview} disabled={loading}>
           Preview
         </button>
@@ -655,19 +679,25 @@ export default function App() {
         </button>
       </form>
 
-      {showPreviewPanel && previewStreamUrl && (
-        <div className="preview-panel">
+      {showPreviewPanel && (
+        <div className="preview-panel" ref={previewPanelRef}>
           <div className="preview-panel-inner">
             <h3>Preview — clips converted to MP3, then mixed with crossfade</h3>
+            {loading && loadingMode === "preview" ? (
+              <p className="preview-clip-label">Building preview… Downloading from YouTube and mixing (can take 2–5 min). Please wait.</p>
+            ) : previewStreamUrl ? (
+              <>
             <p className="preview-clip-label">
-              First 2 clips, up to 12s each (so preview can finish on free hosting). Full mix when you Generate MP3.
+              Same gapless mix as the final file.
               {prevPreviewStreamUrl && " Use A/B compare to hear changes between previews."}
             </p>
             <audio
+              key={previewABChoice === "previous" && prevPreviewStreamUrl ? prevPreviewStreamUrl : previewStreamUrl}
               ref={previewAudioRef}
               src={previewABChoice === "previous" && prevPreviewStreamUrl ? prevPreviewStreamUrl : previewStreamUrl}
               controls
               autoPlay
+              playsInline
             />
             <div className="preview-controls-row">
               <label className="preview-loop-toggle">
@@ -724,6 +754,10 @@ export default function App() {
               Save to computer
             </a>
             <button type="button" className="btn-secondary" onClick={stopPreview}>Stop preview</button>
+              </>
+            ) : (
+              <p className="preview-clip-label">Preview failed. See error above.</p>
+            )}
           </div>
         </div>
       )}
@@ -734,7 +768,7 @@ export default function App() {
           <p>Downloading clips from YouTube, then mixing with crossfade. Please wait — don’t close the page.</p>
         </div>
       )}
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error" ref={errorRef} role="alert">{error}</div>}
     </>
   );
 }
