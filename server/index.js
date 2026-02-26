@@ -37,6 +37,21 @@ cleanupOldFiles();
 app.use(cors());
 app.use(express.json());
 
+// Light rate limit so we don't hammer YouTube (helps cookies last longer)
+const rateLimit = { videoInfo: new Map(), mashup: new Map() };
+const RATE_WINDOW_MS = 60 * 1000;
+const MAX_VIDEO_INFO_PER_MIN = 20;
+const MAX_MASHUP_PER_MIN = 5;
+function checkRateLimit(key, map, max) {
+  const now = Date.now();
+  let list = map.get(key) || [];
+  list = list.filter((t) => now - t < RATE_WINDOW_MS);
+  if (list.length >= max) return false;
+  list.push(now);
+  map.set(key, list);
+  return true;
+}
+
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "Server running" });
 });
@@ -123,7 +138,7 @@ function friendlyYouTubeError(rawMessage) {
     if (!hasCookies) {
       return "This video couldn’t be loaded (YouTube is blocking the server). Fix: In Render → Environment, add YTDLP_COOKIES with base64 of your YouTube cookies (export from Chrome, base64 the file, paste). Or try another video / run the app locally.";
     }
-    return "This video couldn’t be loaded from our server. Your cookies may have expired — export fresh cookies and update YTDLP_COOKIES on Render. Or try another video.";
+    return "YouTube invalidated the server cookies. To fix: 1) In Chrome open youtube.com and export cookies (cookies.txt extension → Export for this site, Netscape). 2) Run: base64 -i cookies.txt | tr -d '\\n' > b64.txt 3) In Render → Environment set YTDLP_COOKIES to the contents of b64.txt, Save, then Redeploy.";
   }
   if (lower.includes("requested format is not available") || lower.includes("format is not available")) {
     return "This video’s audio format isn’t available. Try another video.";
@@ -316,6 +331,10 @@ function concatWithCrossfade(inputPaths, durationsSec, outputPath, crossfadeMs) 
 }
 
 app.get("/api/video-info", (req, res) => {
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+  if (!checkRateLimit(ip, rateLimit.videoInfo, MAX_VIDEO_INFO_PER_MIN)) {
+    return res.status(429).json({ error: "Too many requests. Wait a minute and try again." });
+  }
   const url = req.query.url;
   if (!url || !isYouTubeUrl(url)) {
     return res.status(400).json({ error: "Valid YouTube URL required." });
@@ -355,6 +374,10 @@ app.get("/api/video-info", (req, res) => {
 });
 
 app.post("/api/mashup", async (req, res) => {
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "unknown";
+  if (!checkRateLimit(ip, rateLimit.mashup, MAX_MASHUP_PER_MIN)) {
+    return res.status(429).json({ error: "Too many mashups. Wait a minute and try again." });
+  }
   const { urls = [], clips: clipsBody, duration = 10, crossfade = 1000, preview = false, maxClips = 3 } = req.body;
   const defaultDuration = Math.max(1, Math.min(120, Number(duration) || 10));
   const crossfadeMs = Math.max(2500, Math.min(6000, Number(crossfade) || 2500));
