@@ -43,7 +43,7 @@ cleanupOldFiles();
 app.use(cors());
 app.use(express.json());
 
-// Light rate limit so we don't hammer YouTube (helps cookies last longer)
+// Light rate limit so we don't hammer YouTube
 const rateLimit = { videoInfo: new Map(), mashup: new Map(), convert: new Map() };
 const RATE_WINDOW_MS = 60 * 1000;
 const MAX_VIDEO_INFO_PER_MIN = 20;
@@ -111,9 +111,7 @@ app.get("/api/health", (req, res) => {
 });
 
 app.get("/api/status", (req, res) => {
-  const fromEnv = !!(process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim());
-  const fromFile = !!(process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE));
-  res.json({ ok: true, cookiesConfigured: fromEnv || fromFile });
+  res.json({ ok: true });
 });
 
 function isYouTubeUrl(s) {
@@ -188,11 +186,7 @@ function friendlyYouTubeError(rawMessage) {
   if (!rawMessage || typeof rawMessage !== "string") return rawMessage;
   const lower = rawMessage.toLowerCase();
   if (lower.includes("sign in") || lower.includes("not a bot") || (lower.includes("cookies") && lower.includes("bot"))) {
-    const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
-    if (!hasCookies) {
-      return "This video couldn’t be loaded (YouTube is blocking the server). Fix: In Render → Environment, add YTDLP_COOKIES with base64 of your YouTube cookies (export from Chrome, base64 the file, paste). Or try another video / run the app locally.";
-    }
-    return "YouTube invalidated the server cookies. To fix: 1) In Chrome open youtube.com and export cookies (cookies.txt extension → Export for this site, Netscape). 2) Run: base64 -i cookies.txt | tr -d '\\n' > b64.txt 3) In Render → Environment set YTDLP_COOKIES to the contents of b64.txt, Save, then Redeploy.";
+    return "This video couldn’t be loaded from our server. Try another video or upload an MP3 file instead.";
   }
   if (lower.includes("requested format is not available") || lower.includes("format is not available")) {
     return "This video’s audio format isn’t available. Try another video.";
@@ -204,28 +198,10 @@ const YOUTUBE_PLAYER_CLIENTS = ["android,web", "ios", "tv_embedded", "mweb"];
 
 function getYtDlpBaseArgs(playerClient = null) {
   const args = ["--no-warnings", "--no-check-certificate"];
-  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
-  if (!hasCookies && playerClient) {
+  if (playerClient) {
     args.push("--extractor-args", `youtube:player_client=${playerClient}`);
-  } else if (!hasCookies) {
+  } else {
     args.push("--extractor-args", "youtube:player_client=android,web");
-  }
-  const cookiesPath = process.env.YTDLP_COOKIES_FILE;
-  const cookiesB64 = process.env.YTDLP_COOKIES;
-  if (cookiesPath && fs.existsSync(cookiesPath)) {
-    args.push("--cookies", cookiesPath);
-    console.log("[Cookies] Using cookie file:", cookiesPath);
-  } else if (cookiesB64) {
-    try {
-      const decoded = Buffer.from(cookiesB64.trim(), "base64").toString("utf8");
-      const withHeader = decoded.startsWith("#") ? decoded : "# Netscape HTTP Cookie File\n" + decoded;
-      const cookiePath = path.join(os.tmpdir(), "ytdlp_cookies.txt");
-      fs.writeFileSync(cookiePath, withHeader, { mode: 0o600 });
-      args.push("--cookies", cookiePath);
-      console.log("[Cookies] Using cookie file (from YTDLP_COOKIES)");
-    } catch (e) {
-      console.error("[Cookies] Failed to write cookie file:", e.message);
-    }
   }
   return args;
 }
@@ -387,8 +363,7 @@ function concatWithCrossfade(inputPaths, durationsSec, outputPath, crossfadeMs) 
 }
 
 function getVideoMetadata(cleanUrl) {
-  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
-  const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
+  const clientsToTry = [null, ...YOUTUBE_PLAYER_CLIENTS];
   const ytdlp = findYtDlp();
   for (const client of clientsToTry) {
     const result = spawnSync(ytdlp, ["--dump-json", "-s", "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", ...getYtDlpBaseArgs(client), cleanUrl], {
@@ -422,8 +397,7 @@ app.get("/api/video-info", (req, res) => {
     return res.status(400).json({ error: "Valid YouTube URL required." });
   }
   const cleanUrl = normalizeYouTubeUrl(url);
-  const hasCookies = !!(process.env.YTDLP_COOKIES || (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)));
-  const clientsToTry = hasCookies ? [null] : [null, ...YOUTUBE_PLAYER_CLIENTS];
+  const clientsToTry = [null, ...YOUTUBE_PLAYER_CLIENTS];
   let lastErrMsg = "";
   try {
     const ytdlp = findYtDlp();
@@ -483,12 +457,18 @@ app.post("/api/mashup", async (req, res) => {
   const invalid = list.filter((c) => !isYouTubeUrl(c.url) && !String(c.url).startsWith("upload:"));
   if (invalid.length) {
     return res.status(400).json({
-      error: "Each clip must be a YouTube URL or an uploaded file: " + invalid.slice(0, 3).map((c) => `"${String(c.url).slice(0, 50)}…"`).join(", "),
+      error: "Each clip must be a converted MP3 or uploaded file: " + invalid.slice(0, 3).map((c) => `"${String(c.url).slice(0, 50)}…"`).join(", "),
       invalid: invalid.slice(0, 5).map((c) => c.url),
     });
   }
+  const youtubeClips = list.filter((c) => isYouTubeUrl(c.url));
+  if (youtubeClips.length > 0) {
+    return res.status(400).json({
+      error: "Convert each YouTube link to MP3 first. Use ‘Convert YouTube to MP3’ above, add the track, then generate. Mashup uses only converted or uploaded files.",
+    });
+  }
   if (list.length === 0) {
-    return res.status(400).json({ error: "Enter at least one YouTube URL or upload a file." });
+    return res.status(400).json({ error: "Enter at least one track (convert a YouTube link or upload a file)." });
   }
 
   const clipPaths = [];
@@ -650,7 +630,5 @@ if (fs.existsSync(clientDist)) {
 
 const PORT = process.env.PORT || 5175;
 app.listen(PORT, () => {
-  const cookiesFromEnv = !!(process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim());
-  const cookiesFromFile = !!(process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE));
-  console.log(`Server running at http://localhost:${PORT} | cookies: ${cookiesFromEnv || cookiesFromFile ? "configured" : "not set"}`);
+  console.log(`Server running at http://localhost:${PORT}`);
 });

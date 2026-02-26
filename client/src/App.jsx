@@ -373,6 +373,39 @@ export default function App() {
     return list;
   }, [urls, clipStarts, clipDurations, videoDurations]);
 
+  const convertYouTubeClipsToUploads = useCallback(async (list, currentUrls, currentDurations, currentTitles) => {
+    const uniqueYoutubeUrls = [...new Set(list.filter((c) => getYouTubeVideoId(c.url)).map((c) => (c.url || "").trim().startsWith("http") ? c.url.trim() : "https://" + c.url.trim())))];
+    const urlToUpload = {};
+    for (const url of uniqueYoutubeUrls) {
+      const res = await fetch(`${API}/convert`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Convert failed");
+      urlToUpload[url] = { uploadId: data.uploadId, duration: data.duration, title: data.title };
+    }
+    const convertedList = list.map((c) => {
+      const normalized = (c.url || "").trim().startsWith("http") ? c.url.trim() : "https://" + (c.url || "").trim();
+      if (getYouTubeVideoId(c.url) && urlToUpload[normalized]) {
+        return { ...c, url: `upload:${urlToUpload[normalized].uploadId}` };
+      }
+      return c;
+    });
+    const nextUrls = [...currentUrls];
+    const nextDurations = [...currentDurations];
+    const nextTitles = [...currentTitles];
+    for (const c of list) {
+      if (!getYouTubeVideoId(c.url)) continue;
+      const normalized = (c.url || "").trim().startsWith("http") ? c.url.trim() : "https://" + (c.url || "").trim();
+      const info = urlToUpload[normalized];
+      if (info) {
+        const i = c.index;
+        nextUrls[i] = `upload:${info.uploadId}`;
+        nextDurations[i] = info.duration ?? nextDurations[i];
+        nextTitles[i] = info.title ?? nextTitles[i];
+      }
+    }
+    return { convertedList, nextUrls, nextDurations, nextTitles };
+  }, []);
+
   const applyRecipe = useCallback((recipe) => {
     if (!recipe || !Array.isArray(recipe.urls) || !recipe.urls.length) return;
     const nextUrls = recipe.urls.map((u) => String(u || ""));
@@ -467,7 +500,7 @@ export default function App() {
 
   const startPreview = useCallback(async () => {
     stopAllOtherAudio();
-    const list = buildClipsList();
+    let list = buildClipsList();
     if (list.length === 0) {
       setError("Add at least one track: convert a YouTube link above and click ‘Add to mashup’, or upload a file.");
       return;
@@ -479,6 +512,22 @@ export default function App() {
     setShowPreviewPanel(true);
     setLoading(true);
     setLoadingMode("preview");
+    let titlesForPayload = songTitles;
+    try {
+      if (list.some((c) => getYouTubeVideoId(c.url))) {
+        const { convertedList, nextUrls, nextDurations, nextTitles } = await convertYouTubeClipsToUploads(list, urls, videoDurations, songTitles);
+        setUrls(nextUrls);
+        setVideoDurations(nextDurations);
+        setSongTitles(nextTitles);
+        titlesForPayload = nextTitles;
+        list = convertedList;
+      }
+    } catch (err) {
+      setLoading(false);
+      setLoadingMode(null);
+      setError(err.message || "Converting YouTube to MP3 failed.");
+      return;
+    }
     const PREVIEW_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes (full clips, multiple songs)
     const ac = new AbortController();
     const timeoutId = setTimeout(() => ac.abort(), PREVIEW_TIMEOUT_MS);
@@ -489,7 +538,7 @@ export default function App() {
         body: JSON.stringify({
           clips: list.map(({ url, start, duration }) => ({ url, start, duration })),
           urls: list.map((c) => c.url),
-          titles: list.map((c) => songTitles[c.index] ?? ""),
+          titles: list.map((c) => titlesForPayload[c.index] ?? ""),
           name: (mashupNameForSave || "").trim() || undefined,
           duration: DEFAULT_CLIP_DURATION,
           crossfade: Number(crossfade) || 2500,
@@ -543,7 +592,7 @@ export default function App() {
       setLoading(false);
       setLoadingMode(null);
     }
-  }, [buildClipsList, crossfade, previewStreamUrl, stopAllOtherAudio]);
+  }, [buildClipsList, crossfade, previewStreamUrl, stopAllOtherAudio, urls, videoDurations, songTitles, convertYouTubeClipsToUploads]);
 
   useEffect(() => {
     if (!previewAudioRef.current) return;
@@ -626,11 +675,27 @@ export default function App() {
     setResult(null);
     setLoading(true);
     setLoadingMode("generate");
+    let titlesForPayload = songTitles;
+    try {
+      if (list.some((c) => getYouTubeVideoId(c.url))) {
+        const { convertedList, nextUrls, nextDurations, nextTitles } = await convertYouTubeClipsToUploads(list, urls, videoDurations, songTitles);
+        setUrls(nextUrls);
+        setVideoDurations(nextDurations);
+        setSongTitles(nextTitles);
+        titlesForPayload = nextTitles;
+        list = convertedList;
+      }
+    } catch (err) {
+      setLoading(false);
+      setLoadingMode(null);
+      setError(err.message || "Converting YouTube to MP3 failed.");
+      return;
+    }
     try {
       const payload = {
         clips: list.map(({ url, start, duration }) => ({ url, start, duration })),
         urls: list.map((c) => c.url),
-        titles: list.map((c) => songTitles[c.index] ?? ""),
+        titles: list.map((c) => titlesForPayload[c.index] ?? ""),
         name: (mashupNameForSave || "").trim() || undefined,
         duration: defaultDur,
         crossfade: Number(crossfade) || 2500,
