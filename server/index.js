@@ -145,6 +145,7 @@ function getYtDlpBaseArgs(playerClient = null) {
   const cookiesB64 = process.env.YTDLP_COOKIES;
   if (cookiesPath && fs.existsSync(cookiesPath)) {
     args.push("--cookies", cookiesPath);
+    console.log("[Cookies] Using cookie file:", cookiesPath);
   } else if (cookiesB64) {
     try {
       const decoded = Buffer.from(cookiesB64.trim(), "base64").toString("utf8");
@@ -152,6 +153,7 @@ function getYtDlpBaseArgs(playerClient = null) {
       const cookiePath = path.join(os.tmpdir(), "ytdlp_cookies.txt");
       fs.writeFileSync(cookiePath, withHeader, { mode: 0o600 });
       args.push("--cookies", cookiePath);
+      console.log("[Cookies] Using cookie file (from YTDLP_COOKIES)");
     } catch (e) {
       console.error("[Cookies] Failed to write cookie file:", e.message);
     }
