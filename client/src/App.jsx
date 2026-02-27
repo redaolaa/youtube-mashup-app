@@ -23,20 +23,23 @@ function saveSavedMashups(list) {
 }
 
 function formatTime(sec) {
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
+  const n = Number(sec);
+  if (!Number.isFinite(n) || n < 0) return "0:00";
+  const m = Math.floor(n / 60);
+  const s = Math.floor(n % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function TrimRange({ videoDuration, start, duration, onStartChange, onDurationChange }) {
   const trackRef = useRef(null);
   const [dragging, setDragging] = useState(null); // "start" | "end"
+  const safeDuration = Math.max(1, Number(videoDuration) || 1);
 
   const ratioToTime = useCallback(
-    (ratio) => Math.max(0, Math.min(videoDuration, Math.round(ratio * videoDuration))),
-    [videoDuration]
+    (ratio) => Math.max(0, Math.min(safeDuration, Math.round(ratio * safeDuration))),
+    [safeDuration]
   );
-  const timeToRatio = useCallback((t) => t / videoDuration, [videoDuration]);
+  const timeToRatio = useCallback((t) => t / safeDuration, [safeDuration]);
 
   const getRatio = useCallback(
     (e) => {
@@ -68,11 +71,11 @@ function TrimRange({ videoDuration, start, duration, onStartChange, onDurationCh
         onDurationChange(start + duration - newStart);
       } else {
         const minEnd = start + 1;
-        const newEnd = Math.max(minEnd, Math.min(videoDuration, t));
+        const newEnd = Math.max(minEnd, Math.min(safeDuration, t));
         onDurationChange(newEnd - start);
       }
     },
-    [dragging, start, duration, videoDuration, getRatio, ratioToTime, onStartChange, onDurationChange]
+    [dragging, start, duration, safeDuration, getRatio, ratioToTime, onStartChange, onDurationChange]
   );
   const handlePointerUp = useCallback(() => setDragging(null), []);
 
@@ -88,8 +91,8 @@ function TrimRange({ videoDuration, start, duration, onStartChange, onDurationCh
     };
   }, [dragging, handlePointerMove, handlePointerUp]);
 
-  const useStart = Math.min(Math.max(0, start), videoDuration - 1);
-  const useEnd = Math.min(Math.max(useStart + 1, start + duration), videoDuration);
+  const useStart = Math.min(Math.max(0, start), safeDuration - 1);
+  const useEnd = Math.min(Math.max(useStart + 1, start + duration), safeDuration);
   const useDuration = useEnd - useStart;
   const startRatio = Math.max(0, Math.min(1, timeToRatio(useStart)));
   const endRatio = Math.max(0, Math.min(1, timeToRatio(useEnd)));
@@ -102,7 +105,7 @@ function TrimRange({ videoDuration, start, duration, onStartChange, onDurationCh
         <span className="trim-range-segment">
           {formatTime(useStart)} – {formatTime(useEnd)}
         </span>
-        <span>{formatTime(videoDuration)}</span>
+        <span>{formatTime(safeDuration)}</span>
       </div>
       <div
         ref={trackRef}
@@ -190,6 +193,7 @@ export default function App() {
   const mashupListRef = useRef(null);
   const lastTrackRowRef = useRef(null);
   const trimAudioRefs = useRef([]);
+  const trimPreviewAudiosRef = useRef(Object.create(null)); // trackIndex -> { audio, timeoutId }
   const [skippedForPreview, setSkippedForPreview] = useState([]);
   const [serverOk, setServerOk] = useState(null);
   const [convertUrl, setConvertUrl] = useState("");
@@ -253,12 +257,8 @@ export default function App() {
     uploadRowRef.current = rowIndex;
     fileInputRef.current?.click();
   };
-  const handleUploadChange = async (e) => {
-    const file = e.target?.files?.[0];
-    const rowIndex = uploadRowRef.current;
-    e.target.value = "";
-    uploadRowRef.current = null;
-    if (file == null || rowIndex == null) return;
+  const uploadFileToExistingRow = async (file, rowIndex) => {
+    if (!file || rowIndex == null) return;
     setDurationLoading((prev) => ({ ...prev, [rowIndex]: true }));
     try {
       const form = new FormData();
@@ -269,14 +269,80 @@ export default function App() {
         setError(data.error || "Upload failed.");
         return;
       }
-      const { uploadId, duration } = data;
+      const uploadId = data?.uploadId;
+      if (uploadId == null || typeof uploadId !== "string") {
+        setError("Upload failed: no file ID returned.");
+        return;
+      }
       setUrl(rowIndex, `upload:${uploadId}`);
-      setVideoDuration(rowIndex, duration ?? null);
-      setSongTitles((prev) => prev.map((t, j) => (j === rowIndex ? file.name : t)));
+      setVideoDuration(rowIndex, data.duration ?? null);
+      setSongTitles((prev) => prev.map((t, j) => (j === rowIndex ? (file.name || "Audio file") : t)));
     } catch (err) {
-      setError(err.message || "Upload failed.");
+      setError(err?.message || "Upload failed.");
     } finally {
       setDurationLoading((prev) => ({ ...prev, [rowIndex]: false }));
+    }
+  };
+  const appendFileAsNewTrack = async (file) => {
+    if (!file) return;
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API}/upload`, { method: "POST", body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data?.error || "Upload failed.");
+        return;
+      }
+      const uploadId = data?.uploadId;
+      if (uploadId == null || typeof uploadId !== "string") {
+        setError("Upload failed: no file ID returned.");
+        return;
+      }
+      const dur = data.duration ?? null;
+      const label = file?.name || "Audio file";
+      setUrls((prev) => [...prev, `upload:${uploadId}`]);
+      setClipStarts((prev) => [...prev, 0]);
+      setClipDurations((prev) => [...prev, dur]);
+      setVideoDurations((prev) => [...prev, dur]);
+      setSongTitles((prev) => [...prev, label]);
+    } catch (err) {
+      setError(err?.message || "Upload failed.");
+    }
+  };
+  const handleUploadChange = async (e) => {
+    const files = Array.from(e.target?.files || []);
+    const rowIndex = uploadRowRef.current;
+    e.target.value = "";
+    uploadRowRef.current = null;
+    if (!files.length) return;
+    try {
+      if (rowIndex != null) {
+        await uploadFileToExistingRow(files[0], rowIndex);
+        for (const f of files.slice(1)) {
+          await appendFileAsNewTrack(f);
+        }
+      } else {
+        for (const file of files) {
+          await appendFileAsNewTrack(file);
+        }
+      }
+    } catch (err) {
+      setError(err?.message || "Upload failed.");
+    }
+  };
+  const handleGlobalDrop = async (e) => {
+    e.preventDefault();
+    const fileList = Array.from(e.dataTransfer?.files || []);
+    if (!fileList.length) return;
+    const audioFiles = fileList.filter((f) => f?.type?.startsWith("audio/") || /\.(mp3|m4a|wav|webm|ogg)$/i.test(f?.name || ""));
+    if (!audioFiles.length) return;
+    try {
+      for (const file of audioFiles) {
+        await appendFileAsNewTrack(file);
+      }
+    } catch (err) {
+      setError(err?.message || "Upload failed.");
     }
   };
 
@@ -418,6 +484,12 @@ export default function App() {
     setClipStarts((recipe.clipStarts || []).slice(0, n).concat(Array(Math.max(0, n - (recipe.clipStarts || []).length)).fill(0)));
     setClipDurations((recipe.clipDurations || []).slice(0, n).concat(Array(Math.max(0, n - (recipe.clipDurations || []).length)).fill(null)));
     setVideoDurations(Array(n).fill(null));
+    // Reset titles so labels always match the current URLs
+    if (Array.isArray(recipe.titles) && recipe.titles.length) {
+      setSongTitles(recipe.titles.slice(0, n).concat(Array(Math.max(0, n - recipe.titles.length)).fill(null)));
+    } else {
+      setSongTitles(Array(n).fill(null));
+    }
     if (typeof recipe.crossfade === "number" && !Number.isNaN(recipe.crossfade)) {
       setCrossfade(Math.max(2500, Math.min(6000, recipe.crossfade)));
     }
@@ -493,20 +565,90 @@ export default function App() {
     }
   }, [applyRecipe]);
 
+  const stopTrimAudioForTrack = useCallback((trackIndex) => {
+    const entry = trimPreviewAudiosRef.current[trackIndex];
+    if (!entry) return;
+    if (entry.timeoutId != null) clearTimeout(entry.timeoutId);
+    entry.timeoutId = null;
+    entry.audio?.pause();
+  }, []);
+
   const stopAllOtherAudio = useCallback(() => {
     if (previewAudioRef.current) previewAudioRef.current.pause();
     (trimAudioRefs.current || []).forEach((el) => { if (el && el.pause) el.pause(); });
+    const bag = trimPreviewAudiosRef.current;
+    Object.keys(bag).forEach((key) => {
+      const entry = bag[key];
+      if (entry) {
+        if (entry.timeoutId != null) clearTimeout(entry.timeoutId);
+        entry.timeoutId = null;
+        entry.audio?.pause();
+      }
+    });
   }, []);
 
   const stopTrimAudiosOnly = useCallback(() => {
     (trimAudioRefs.current || []).forEach((el) => { if (el && el.pause) el.pause(); });
+    const bag = trimPreviewAudiosRef.current;
+    Object.keys(bag).forEach((key) => {
+      const entry = bag[key];
+      if (entry) {
+        if (entry.timeoutId != null) clearTimeout(entry.timeoutId);
+        entry.timeoutId = null;
+        entry.audio?.pause();
+      }
+    });
   }, []);
+
+  const handleTrimSegmentPlay = useCallback((trackIndex) => {
+    const u = urls[trackIndex];
+    if (u == null || typeof u !== "string") return;
+    const isUpload = u.startsWith("upload:");
+    if (!isUpload) return;
+    const streamSrc = `${API}/stream/upload_${u.slice(7)}.mp3`;
+    const startSec = clipStarts[trackIndex] ?? 0;
+    const durationSec = clipDurations[trackIndex] ?? Math.min(30, videoDurations[trackIndex] ?? 300);
+    const bag = trimPreviewAudiosRef.current;
+    let entry = bag[trackIndex];
+    if (!entry) {
+      const audio = new Audio();
+      audio.preload = "auto";
+      bag[trackIndex] = { audio, timeoutId: null };
+      entry = bag[trackIndex];
+    }
+    const audio = entry.audio;
+    // Toggle: if this track is already playing, pause it; otherwise start it.
+    if (!audio.paused) {
+      stopTrimAudioForTrack(trackIndex);
+      return;
+    }
+    const trimStart = Math.max(0, Number(startSec) || 0);
+    const trimDuration = Math.max(0.5, Number(durationSec) || 10);
+    if (entry.timeoutId != null) clearTimeout(entry.timeoutId);
+    entry.timeoutId = null;
+    audio.src = streamSrc;
+    const scheduleStop = () => {
+      entry.timeoutId = setTimeout(() => {
+        stopTrimAudioForTrack(trackIndex);
+      }, trimDuration * 1000);
+    };
+    const applyTrimAndPlay = () => {
+      audio.currentTime = trimStart;
+      audio.play().catch(() => {});
+      scheduleStop();
+    };
+    if (audio.readyState >= 2) {
+      applyTrimAndPlay();
+    } else {
+      audio.addEventListener("canplay", applyTrimAndPlay, { once: true });
+    }
+  }, [urls, clipStarts, clipDurations, videoDurations, stopTrimAudioForTrack]);
 
   const startPreview = useCallback(async () => {
     stopAllOtherAudio();
     let list = buildClipsList();
     if (list.length === 0) {
-      setError("Add at least one track: convert a YouTube link above and click ‘Add to mashup’, or upload a file.");
+      setError("Add at least one track by uploading an audio file.");
       return;
     }
     const included = new Set(list.map((c) => c.index));
@@ -672,7 +814,7 @@ export default function App() {
       });
     }
     if (list.length === 0) {
-      setError("Add at least one track: convert a YouTube link above and click ‘Add to mashup’, or upload a file.");
+      setError("Add at least one track by uploading an audio file.");
       return;
     }
     setError("");
@@ -736,82 +878,82 @@ export default function App() {
     setError("");
   };
 
-  if (result) {
-    return (
-      <div className="success">
-        <h2>Your mashup is ready</h2>
-        <p className="success-play-label">Play it below before downloading — use the player to listen, then download if you like it.</p>
-        <div className="audio-wrap" aria-label="Play mashup">
-          <audio controls preload="metadata" src={result.streamUrl} className="success-audio">
-            Your browser does not support the audio player.
-          </audio>
-        </div>
-        <a className="download-link" href={result.downloadUrl} download={result.suggestedFilename || "mashup.mp3"}>
-          Download MP3
-        </a>
-        <br />
-        <a className="back-link" href="#" onClick={(e) => { e.preventDefault(); reset(); }}>
-          ← Make another mashup
-        </a>
-      </div>
-    );
-  }
-
   return (
     <>
       <h1>YouTube Mashup Generator</h1>
-
-      <section className="convert-section" aria-label="Convert YouTube to MP3">
-        <h2>Convert YouTube to MP3</h2>
-        <p className="convert-desc">Paste a link — the track appears right below and you trim it immediately.</p>
-        <div className="convert-row">
-          <input
-            type="text"
-            className="convert-input"
-            placeholder="https://youtube.com/watch?v=..."
-            value={convertUrl}
-            onChange={(e) => { setConvertUrl(e.target.value); setConvertError(""); setConvertResult(null); }}
-            onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleConvert(e))}
-            disabled={convertLoading}
-          />
+      <form onSubmit={handleSubmit} onKeyDown={handleFormKeyDown}>
+        <section className="convert-section" aria-label="Convert YouTube link to MP3 and add as track">
+          <h2>Convert a YouTube link</h2>
+          <p className="convert-desc">
+            Paste a YouTube URL and we&apos;ll convert it to MP3, then add it below as a track you can trim and reorder.
+          </p>
+          <div className="convert-row">
+            <input
+              type="text"
+              className="convert-input"
+              placeholder="Paste YouTube link (e.g. https://youtu.be/...)"
+              value={convertUrl}
+              onChange={(e) => setConvertUrl(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handleConvert}
+              disabled={convertLoading}
+            >
+              {convertLoading ? "Converting…" : "Add from YouTube"}
+            </button>
+          </div>
+          {convertError && <p className="convert-error">{convertError}</p>}
+        </section>
+        <div className="upload-intro-row">
           <button
             type="button"
             className="btn-primary"
-            disabled={convertLoading || !convertUrl.trim()}
-            onClick={handleConvert}
+            onClick={() => {
+              uploadRowRef.current = null;
+              fileInputRef.current?.click();
+            }}
           >
-            {convertLoading ? "Converting…" : "Convert to MP3"}
+            Upload audio files
           </button>
         </div>
-        {convertError && <p className="convert-error">{convertError}</p>}
-        {convertResult && (
-          <div className="convert-result">
-            <audio controls src={convertResult.streamUrl} style={{ display: "block", marginBottom: "0.5rem" }} />
-            <a href={convertResult.downloadUrl} download className="btn-secondary">
-              Download MP3
-            </a>
-          </div>
-        )}
-      </section>
-
-      <form onSubmit={handleSubmit} onKeyDown={handleFormKeyDown}>
-        <div className="url-list" ref={mashupListRef}>
-          {urls.length === 0 && (
-            <p className="trim-placeholder">Convert a link above — your track will appear here for trimming.</p>
-          )}
+        <div
+          className="upload-drop-zone"
+          onClick={() => {
+            uploadRowRef.current = null;
+            fileInputRef.current?.click();
+          }}
+          onDragOver={(e) => {
+            if (e.dataTransfer?.types?.includes("Files")) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "copy";
+            }
+          }}
+          onDrop={handleGlobalDrop}
+        >
+          <p>Drag and drop audio files here.</p>
+        </div>
+        <div
+          className="url-list"
+          ref={mashupListRef}
+        >
+          {urls.length === 0 && null}
           {urls.length >= 1 && (
-            <p className="tracks-hint">Trim each track below. Convert another link above or add a track below to build your mashup.</p>
+            <p className="tracks-hint">Trim each uploaded track below. Add another track to build your mashup.</p>
           )}
           <input
             type="file"
             ref={fileInputRef}
             accept="audio/*,.mp3,.m4a,.wav,.webm,.ogg"
+            multiple
             style={{ display: "none" }}
             onChange={handleUploadChange}
           />
           {urls.map((u, i) => {
+            if (u == null || typeof u !== "string") return null;
             const videoId = getYouTubeVideoId(u);
-            const isUpload = typeof u === "string" && u.startsWith("upload:");
+            const isUpload = u.startsWith("upload:");
             const isLastRow = i === urls.length - 1;
             return (
               <div
@@ -855,7 +997,7 @@ export default function App() {
                       <input
                         type="text"
                         data-url-input
-                        placeholder="Paste YouTube link or upload file"
+                        placeholder="Optional track label (upload file with the button)"
                         value={u}
                         onChange={(e) => setUrl(i, e.target.value)}
                         onKeyDown={handleUrlKeyDown(i)}
@@ -885,50 +1027,27 @@ export default function App() {
                       />
                     </div>
                   )}
-                <div className="trim-wrap">
-                  {(videoDurations[i] != null || videoId || isUpload) && (
-                    <p className="trim-label">Trim this clip</p>
-                  )}
-                  {isUpload && typeof u === "string" && u.startsWith("upload:") && (
-                    <div className="trim-audio-player">
-                      <audio
-                        ref={(el) => { trimAudioRefs.current[i] = el; }}
-                        controls
-                        src={`${API}/stream/upload_${u.slice(7)}.mp3`}
-                        style={{ width: "100%", maxWidth: "400px" }}
-                        title="Audio track"
-                      />
-                    </div>
-                  )}
-                  {durationLoading[i] && <p className="trim-loading">Loading song length…</p>}
-                  {(videoDurations[i] != null || videoId || isUpload) && (
-                    <TrimRange
-                      videoDuration={videoDurations[i] ?? 300}
-                      start={clipStarts[i] ?? 0}
-                      duration={clipDurations[i] ?? Math.min(30, videoDurations[i] ?? 300)}
-                      onStartChange={(v) => setClipStart(i, v)}
-                      onDurationChange={(v) => setClipDuration(i, v)}
-                    />
-                  )}
-                  {videoDurations[i] == null && videoId && !durationLoading[i] && (
-                    <p className="trim-hint">Song length loading — you can drag to select; we'll use the real length when generating.</p>
-                  )}
-                  {skippedForPreview[i] && videoId && (
-                    <p className="trim-hint trim-warning">
-                      This song couldn’t be included in the mix preview. Try a direct YouTube video link.
-                    </p>
-                  )}
-                  {videoId && (
-                    <div className="trim-inline-player">
-                      <iframe
-                        title={`Trim preview ${i + 1}`}
-                        src={`https://www.youtube.com/embed/${videoId}?start=${Math.max(0, Math.floor(clipStarts[i] ?? 0))}`}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        allowFullScreen
-                      />
-                    </div>
-                  )}
-                </div>
+                  <div className="trim-wrap">
+                    {durationLoading[i] && <p className="trim-loading">Loading song length…</p>}
+                    {videoDurations[i] == null && videoId && !durationLoading[i] && (
+                      <p className="trim-hint">Song length loading — you can drag to select; we'll use the real length when generating.</p>
+                    )}
+                    {skippedForPreview[i] && videoId && (
+                      <p className="trim-hint trim-warning">
+                        This song couldn’t be included in the mix preview. Try a direct YouTube video link.
+                      </p>
+                    )}
+                    {videoId && (
+                      <div className="trim-inline-player">
+                        <iframe
+                          title={`Trim preview ${i + 1}`}
+                          src={`https://www.youtube.com/embed/${videoId}?start=${Math.max(0, Math.floor(clipStarts[i] ?? 0))}`}
+                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                          allowFullScreen
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -939,7 +1058,86 @@ export default function App() {
             <button type="button" className="btn-add-another" onClick={addUrl}>
               + Add another track
             </button>
-            <span className="add-another-hint">Paste a YouTube link here or upload a file, or convert another link above.</span>
+            <span className="add-another-hint">Upload another audio file to add more tracks.</span>
+          </div>
+        )}
+        {urls.length >= 1 && (
+          <div className="timeline-group">
+            <h2 className="timeline-title">Trim tracks</h2>
+            {urls.map((u, i) => {
+              if (u == null || typeof u !== "string") return null;
+              const hasDuration = videoDurations[i] != null || u.startsWith("upload:") || getYouTubeVideoId(u);
+              if (!hasDuration) return null;
+              const track = {
+                url: u,
+                title: songTitles[i] ?? null,
+                clipStart: clipStarts[i] ?? 0,
+                clipDuration: clipDurations[i] ?? Math.min(30, videoDurations[i] ?? 300),
+                videoDuration: videoDurations[i] ?? 300,
+              };
+              const label = track.title || `Track ${i + 1}`;
+              const isUpload = track.url.startsWith("upload:");
+              const streamSrc = isUpload ? `${API}/stream/upload_${track.url.slice(7)}.mp3` : null;
+              const startSec = track.clipStart;
+              const durSec = track.clipDuration;
+              return (
+                <div
+                  key={`timeline-${i}-${u}`}
+                  className="timeline-row"
+                  onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("timeline-row--drag-over"); }}
+                  onDragLeave={(e) => { e.currentTarget.classList.remove("timeline-row--drag-over"); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.currentTarget.classList.remove("timeline-row--drag-over");
+                    const from = dragIndexRef.current;
+                    const to = i;
+                    if (from == null || from === to) return;
+                    const reorder = (arr) => { const next = [...arr]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); return next; };
+                    setUrls((prev) => reorder(prev));
+                    setClipStarts((prev) => reorder(prev));
+                    setClipDurations((prev) => reorder(prev));
+                    setVideoDurations((prev) => reorder(prev));
+                    setSongTitles((prev) => reorder(prev));
+                    dragIndexRef.current = null;
+                  }}
+                >
+                  <div className="timeline-row-label">
+                    {urls.length > 1 && (
+                      <div
+                        className="timeline-drag-handle"
+                        draggable
+                        onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); dragIndexRef.current = i; e.currentTarget.closest(".timeline-row")?.classList.add("timeline-row--dragging"); }}
+                        onDragEnd={() => { document.querySelectorAll(".track-card, .timeline-row").forEach((el) => el.classList.remove("track-card--dragging", "track-card--drag-over", "timeline-row--dragging", "timeline-row--drag-over")); dragIndexRef.current = null; }}
+                        title="Drag to reorder"
+                      >
+                        ⋮⋮
+                      </div>
+                    )}
+                    <span>{i + 1}. {label}</span>
+                  </div>
+                  <div className="timeline-row-main">
+                    <TrimRange
+                      videoDuration={Math.max(1, videoDurations[i] ?? 300)}
+                      start={startSec}
+                      duration={durSec}
+                      onStartChange={(v) => setClipStart(i, v)}
+                      onDurationChange={(v) => setClipDuration(i, v)}
+                    />
+                    {streamSrc && (
+                      <button
+                        type="button"
+                        className="trim-btn trim-btn-play"
+                        onClick={() => handleTrimSegmentPlay(i)}
+                        title={`Play or pause trimmed section: ${label}`}
+                        aria-label={`Play or pause ${label}`}
+                      >
+                        ▶
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
         {urls.length >= 2 && (
@@ -975,6 +1173,7 @@ export default function App() {
                   clipStarts,
                   clipDurations,
                   crossfade,
+                  titles: songTitles,
                 };
                 const json = JSON.stringify(recipe);
                 const b64 = btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");

@@ -7,6 +7,8 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -319,6 +321,58 @@ function downloadAudio(url, outPath, opts = {}) {
   throw new Error(lastError || "yt-dlp did not produce an audio file");
 }
 
+const COBALT_API_URL = process.env.COBALT_API_URL?.trim() || null;
+const COBALT_API_KEY = process.env.COBALT_API_KEY?.trim() || null;
+
+async function downloadAudioViaCobaltApi(youtubeUrl, outPath) {
+  if (!COBALT_API_URL) throw new Error("COBALT_API_URL is not set");
+  const baseUrl = COBALT_API_URL.replace(/\/$/, "");
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+  if (COBALT_API_KEY) headers.Authorization = `Api-Key ${COBALT_API_KEY}`;
+  const res = await fetch(`${baseUrl}/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      url: youtubeUrl,
+      audioFormat: "mp3",
+      audioBitrate: "128",
+      downloadMode: "audio",
+    }),
+  });
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (_) {
+    throw new Error(`Cobalt API returned invalid JSON: ${text.slice(0, 200)}`);
+  }
+  if (data.status === "error") {
+    const code = data.error?.code || "unknown";
+    const ctx = data.error?.context;
+    const msg = ctx ? `${code}: ${JSON.stringify(ctx)}` : code;
+    throw new Error(msg);
+  }
+  if (data.status !== "redirect" && data.status !== "tunnel") {
+    throw new Error(data.status === "picker" ? "Cobalt returned multiple options; audio-only request failed." : `Cobalt API: unexpected status ${data.status}`);
+  }
+  const downloadUrl = data.url;
+  if (!downloadUrl || typeof downloadUrl !== "string") {
+    throw new Error("Cobalt API did not return a download URL");
+  }
+  const fileRes = await fetch(downloadUrl, { redirect: "follow" });
+  if (!fileRes.ok) {
+    throw new Error(`Download failed: ${fileRes.status} ${fileRes.statusText}`);
+  }
+  const body = fileRes.body;
+  if (!body) throw new Error("No response body from Cobalt download URL");
+  const nodeStream = Readable.fromWeb(body);
+  const writeStream = fs.createWriteStream(outPath);
+  await pipeline(nodeStream, writeStream);
+}
+
 function trimToDuration(inputPath, outputPath, durationSec) {
   return trimToSegment(inputPath, outputPath, 0, durationSec);
 }
@@ -589,8 +643,18 @@ app.post("/api/convert", async (req, res) => {
   try {
     const meta = getVideoMetadata(cleanUrl);
     if (meta?.title) title = meta.title;
-    console.log("[Convert] Downloading full audio …");
-    downloadAudio(cleanUrl, outPath);
+    if (COBALT_API_URL) {
+      try {
+        console.log("[Convert] Downloading via Cobalt API …");
+        await downloadAudioViaCobaltApi(cleanUrl, outPath);
+      } catch (cobaltErr) {
+        console.warn("[Convert] Cobalt API failed, falling back to yt-dlp:", cobaltErr?.message?.slice(0, 100));
+        downloadAudio(cleanUrl, outPath);
+      }
+    } else {
+      console.log("[Convert] Downloading full audio (yt-dlp) …");
+      downloadAudio(cleanUrl, outPath);
+    }
     const duration = await getAudioDurationSeconds(outPath);
     const filename = `upload_${id}.mp3`;
     return res.json({
