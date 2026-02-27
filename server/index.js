@@ -5,8 +5,6 @@ import { spawnSync, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { Readable } from "stream";
-import { pipeline } from "stream/promises";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 
@@ -200,39 +198,6 @@ function friendlyYouTubeError(rawMessage) {
 }
 
 const YOUTUBE_PLAYER_CLIENTS = ["android,web", "ios", "tv_embedded", "mweb"];
-const COBALT_USER_AGENT = "YouTube-Mashup/1.0 (+https://github.com)";
-const COBALT_INSTANCES_URL = "https://instances.cobalt.best/instances.json";
-
-let _cobaltBaseUrlCache = null;
-async function getCobaltBaseUrl() {
-  if (_cobaltBaseUrlCache !== undefined) return _cobaltBaseUrlCache;
-  const envUrl = process.env.COBALT_API_URL;
-  if (envUrl && typeof envUrl === "string" && envUrl.trim()) {
-    _cobaltBaseUrlCache = envUrl.trim().replace(/\/$/, "");
-    return _cobaltBaseUrlCache;
-  }
-  try {
-    const r = await fetch(COBALT_INSTANCES_URL, {
-      headers: { "User-Agent": COBALT_USER_AGENT },
-    });
-    if (!r.ok) throw new Error(r.status);
-    const list = await r.json();
-    const candidates = Array.isArray(list)
-      ? list.filter((i) => i.online === true && i.services?.youtube === true && i.protocol && i.api)
-      : [];
-    const instance = candidates.length > 0
-      ? candidates.sort((a, b) => (a.info?.auth ? 1 : 0) - (b.info?.auth ? 1 : 0))[0]
-      : null;
-    if (instance) {
-      _cobaltBaseUrlCache = `${instance.protocol}://${instance.api}`.replace(/\/$/, "");
-    } else {
-      _cobaltBaseUrlCache = null;
-    }
-  } catch (_) {
-    _cobaltBaseUrlCache = null;
-  }
-  return _cobaltBaseUrlCache;
-}
 
 let _cookiePathCache = null;
 function getCookiePath() {
@@ -280,57 +245,6 @@ function isBotOrSignInError(errMsg) {
 function isFormatNotAvailableError(errMsg) {
   if (!errMsg || typeof errMsg !== "string") return false;
   return errMsg.toLowerCase().includes("requested format is not available") || errMsg.toLowerCase().includes("format is not available");
-}
-
-/** Cobalt API fallback when yt-dlp hits bot check. Returns Promise<void> or throws. */
-async function downloadAudioViaCobalt(youtubeUrl, outPath) {
-  const baseUrl = await getCobaltBaseUrl();
-  if (!baseUrl) throw new Error("No Cobalt instance available. Set COBALT_API_URL or check instances.cobalt.best.");
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": COBALT_USER_AGENT,
-  };
-  const apiKey = process.env.COBALT_API_KEY;
-  if (apiKey && typeof apiKey === "string" && apiKey.trim()) {
-    headers.Authorization = `Api-Key ${apiKey.trim()}`;
-  }
-  const res = await fetch(`${baseUrl}/`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      url: youtubeUrl,
-      downloadMode: "audio",
-      audioFormat: "mp3",
-      audioBitrate: "128",
-    }),
-  });
-  if (!res.ok) throw new Error(`Cobalt API error: ${res.status}`);
-  const data = await res.json();
-  if (data.status === "error") {
-    const code = data.error?.code || "unknown";
-    const ctx = data.error?.context;
-    const limit = ctx?.limit ? ` (limit: ${ctx.limit}s)` : "";
-    throw new Error(`Cobalt: ${code}${limit}`);
-  }
-  let downloadUrl = data.url;
-  if (!downloadUrl && data.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
-    const first = data.picker[0];
-    downloadUrl = first?.url || (data.audio && data.status === "picker" ? data.audio : null);
-  }
-  if (!downloadUrl || typeof downloadUrl !== "string") throw new Error("Cobalt did not return a download URL");
-  const fileRes = await fetch(downloadUrl, {
-    headers: { "User-Agent": COBALT_USER_AGENT },
-  });
-  if (!fileRes.ok) throw new Error(`Failed to fetch MP3: ${fileRes.status}`);
-  if (typeof Readable.fromWeb === "function") {
-    const dest = fs.createWriteStream(outPath);
-    await pipeline(Readable.fromWeb(fileRes.body), dest);
-  } else {
-    const chunks = [];
-    for await (const chunk of fileRes.body) chunks.push(chunk);
-    fs.writeFileSync(outPath, Buffer.concat(chunks));
-  }
 }
 
 const DOWNLOAD_FORMAT_FALLBACKS = ["best", "bestaudio/best", "worst"];
@@ -609,16 +523,7 @@ app.post("/api/mashup", async (req, res) => {
         const clipUrl = normalizeYouTubeUrl(url);
         rawPath = path.join(DOWNLOAD_DIR, `clip_${clipId}.mp3`);
         console.log(`[Mashup] Downloading clip ${i + 1}/${list.length} …`);
-        try {
-          downloadAudio(clipUrl, rawPath);
-        } catch (ytErr) {
-          if (isBotOrSignInError(ytErr?.message)) {
-            console.log(`[Mashup] Clip ${i + 1} yt-dlp blocked; trying Cobalt API …`);
-            await downloadAudioViaCobalt(clipUrl, rawPath);
-          } else {
-            throw ytErr;
-          }
-        }
+        downloadAudio(clipUrl, rawPath);
         console.log(`[Mashup] Clip ${i + 1}/${list.length} done, trimming ${startSec}s–${startSec + durationSec}s …`);
       }
       await trimToSegment(rawPath, trimPath, startSec, durationSec);
@@ -685,16 +590,7 @@ app.post("/api/convert", async (req, res) => {
     const meta = getVideoMetadata(cleanUrl);
     if (meta?.title) title = meta.title;
     console.log("[Convert] Downloading full audio …");
-    try {
-      downloadAudio(cleanUrl, outPath);
-    } catch (ytErr) {
-      if (isBotOrSignInError(ytErr?.message)) {
-        console.log("[Convert] yt-dlp blocked; trying Cobalt API fallback …");
-        await downloadAudioViaCobalt(cleanUrl, outPath);
-      } else {
-        throw ytErr;
-      }
-    }
+    downloadAudio(cleanUrl, outPath);
     const duration = await getAudioDurationSeconds(outPath);
     const filename = `upload_${id}.mp3`;
     return res.json({
@@ -773,7 +669,4 @@ if (fs.existsSync(clientDist)) {
 const PORT = process.env.PORT || 5175;
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
-  getCobaltBaseUrl().then((url) => {
-    if (url) console.log("[Cobalt] Fallback instance ready:", url);
-  }).catch(() => {});
 });
